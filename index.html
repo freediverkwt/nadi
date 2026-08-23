@@ -136,9 +136,29 @@ async function ask(prompt, search = true, tries = 3) {
 
 // يقرأ الأسعار من الشيت المنشور بصيغة بيانات
 async function readSheet(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`تعذّر فتح الرابط (رمز ${r.status})`);
-  const text = await r.text();
+  let text = null;
+  let lastErr = null;
+
+  const routes = [
+    url,
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
+    "https://corsproxy.io/?" + encodeURIComponent(url),
+  ];
+
+  for (const u of routes) {
+    try {
+      const r = await fetch(u, { cache: "no-store" });
+      if (!r.ok) { lastErr = new Error("رمز " + r.status); continue; }
+      const t = await r.text();
+      if (t && t.length > 40 && !/^\s*</.test(t)) { text = t; break; }
+      lastErr = new Error("المحتوى غير صالح");
+    } catch (e) { lastErr = e; }
+  }
+
+  if (!text) throw new Error(
+    "تعذّر قراءة الرابط" + (lastErr ? " (" + lastErr.message + ")" : "") +
+    " — تأكد أن الشيت منشور بصيغة CSV"
+  );
 
   const prices = {};
   text.split(/\r?\n/).forEach(line => {
