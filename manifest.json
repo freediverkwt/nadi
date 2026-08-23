@@ -1,0 +1,20 @@
+{
+  "name": "نادي المحفظة",
+  "short_name": "المحفظة",
+  "description": "لوحة إدارة المحفظة الاستثمارية",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070F0C",
+  "theme_color": "#0A1712",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

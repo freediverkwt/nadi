@@ -1,0 +1,1287 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>نادي المحفظة</title>
+<meta name="theme-color" content="#0A1712" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="نادي المحفظة" />
+<link rel="manifest" href="manifest.json" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #070F0C; }
+  body { font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif; }
+  button { font-family: inherit; cursor: pointer; }
+  input, textarea { font-family: 'IBM Plex Mono', monospace; }
+  table { border-collapse: collapse; width: 100%; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #boot { min-height:100vh; display:grid; place-items:center; color:#6E8A7C; font-size:14px; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">جاري تجهيز اللوحة…</div></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ═══════════════ الإعدادات ═══════════════ */
+
+// رابط الشيت المنشور بصيغة بيانات — يُضبط من داخل اللوحة
+const SHEET_KEY = "nadi-sheet-url";
+const DATA_KEY  = "nadi-portfolio";
+
+const LINES = {
+  guard: { name: "حارس المرمى", short: "الحارس", target: 0.10, color: "#37C793", soft: "rgba(55,199,147,0.13)" },
+  def:   { name: "خط الدفاع",   short: "الدفاع",  target: 0.40, color: "#E4574C", soft: "rgba(228,87,76,0.13)" },
+  mid:   { name: "خط الوسط",    short: "الوسط",   target: 0.30, color: "#E5B143", soft: "rgba(229,177,67,0.13)" },
+  att:   { name: "خط الهجوم",   short: "الهجوم",  target: 0.20, color: "#B37BE8", soft: "rgba(179,123,232,0.13)" },
+};
+const ORDER = ["guard", "def", "mid", "att"];
+
+const REBAL  = { guard: 0.20, def: 0,    mid: 0.50, att: 0.30 };
+const NORMAL = { guard: 0.10, def: 0.40, mid: 0.30, att: 0.20 };
+
+// توزيع داخلي: الذهب ٧٠٪ والريت ٣٠٪
+const INNER = { "IAU": 0.70, "KFH RIET": 0.30 };
+
+const DEFAULT_RETURNS = { guard: 0.05, def: 0.07, mid: 0.10, att: 0.13 };
+const SCENARIOS = {
+  low:  { name: "متحفّظ", mult: 0.6, color: "#8CA396" },
+  base: { name: "أساسي",  mult: 1.0, color: "#37C793" },
+  high: { name: "متفائل", mult: 1.4, color: "#E5B143" },
+};
+const HORIZONS = [2, 3, 5, 8, 10, 15];
+const RISK = { conc: 0.25, deep: 0.30, watch: 0.15, drift: 0.10 };
+
+const LINE_ROLE = {
+  guard: "أصول تحوّط دفاعية (ذهب وصناديق عقارية) — الدور: حماية رأس المال وقت الأزمات",
+  def:   "أسهم خليجية قيادية موزّعة للأرباح — الدور: الثبات والدخل لا النمو السريع",
+  mid:   "شركات تقنية عالمية عملاقة — الدور: محرك النمو الأساسي طويل الأجل",
+  att:   "أصول عالية المخاطر والعائد — الدور: نمو متفجر مقابل تقلب كبير",
+};
+
+const SEED = [
+  { id:"s1",  line:"guard", name:"صندوق الذهب",   ticker:"IAU",                qty:182.28,  cost:78.8200,  price:86.79  },
+  { id:"s2",  line:"guard", name:"بيتك ريت",       ticker:"KFH RIET",           qty:1081,    cost:3.9312,   price:3.95   },
+  { id:"s3",  line:"def",   name:"بيت التمويل",    ticker:"KFH",                qty:121860,  cost:2.0160,   price:2.52   },
+  { id:"s4",  line:"def",   name:"زين",            ticker:"ZAIN",               qty:9330,    cost:1.7163,   price:2.00   },
+  { id:"s5",  line:"def",   name:"مباني",          ticker:"MABANE",             qty:9508,    cost:2.2433,   price:3.16   },
+  { id:"s6",  line:"def",   name:"صندوق القيمة",   ticker:"SPUS",               qty:0,       cost:0,        price:58.62  },
+  { id:"s7",  line:"def",   name:"أجيليتي جلوبال", ticker:"AGILITY GLOBAL",     qty:73011,   cost:0.0776,   price:0.47   },
+  { id:"s8",  line:"def",   name:"مخازن",          ticker:"MKHAZEN",            qty:31340,   cost:1.5388,   price:0.53   },
+  { id:"s9",  line:"def",   name:"هيومن سوفت",     ticker:"HUMENSOFT (FUTURE)", qty:0,       cost:0,        price:7.70   },
+  { id:"s10", line:"mid",   name:"مايكروسوفت",     ticker:"MICROSOFT",          qty:23.06,   cost:433.7100, price:483.24 },
+  { id:"s11", line:"mid",   name:"إنفيديا",        ticker:"NVIDIA",             qty:45.47,   cost:208.0400, price:214.72 },
+  { id:"s12", line:"mid",   name:"جوجل",           ticker:"GOOGLE",             qty:27.99,   cost:351.2500, price:344.82 },
+  { id:"s13", line:"mid",   name:"ميتا",           ticker:"META",               qty:19.16,   cost:602.4300, price:549.90 },
+  { id:"s14", line:"mid",   name:"تسلا (قديم)",    ticker:"TSLA old",           qty:42.42,   cost:294.7700, price:362.86 },
+  { id:"s15", line:"mid",   name:"تسلا (جديد)",    ticker:"TSLA new",           qty:6.10,    cost:336.8600, price:362.86 },
+  { id:"s16", line:"att",   name:"علي بابا",       ticker:"ALIBABA",            qty:52.10,   cost:124.2300, price:119.34 },
+  { id:"s17", line:"att",   name:"بيتكوين",        ticker:"IBIT",               qty:177.71,  cost:36.3800,  price:43.68  },
+  { id:"s18", line:"att",   name:"أوبر",           ticker:"UBER",               qty:87.14,   cost:74.3200,  price:78.80  },
+];
+const FROZEN_DEFAULT = ["KFH","ZAIN","MABANE","SPUS","AGILITY GLOBAL","MKHAZEN","HUMENSOFT (FUTURE)"];
+const KNOWN = SEED.map(s => s.ticker);
+
+/* ═══════════════ أدوات ═══════════════ */
+const uid   = () => "h" + Math.random().toString(36).slice(2, 9);
+const num   = (n) => (isFinite(n) ? n : 0);
+const pct   = (v) => (v * 100).toFixed(1) + "%";
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+const load = (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+function fv(principal, rate, years, pmt) {
+  const rm = Math.pow(1 + rate, 1/12) - 1;
+  const n = years * 12;
+  const g = Math.pow(1 + rm, n);
+  return principal * g + (rm > 0 ? pmt * ((g - 1) / rm) : pmt * n);
+}
+
+// ينادي الوسيط على الخادم
+async function ask(prompt, search = true, tries = 3) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, search }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        last = new Error(d.error || `رمز ${r.status}`);
+        if (r.status >= 500 || r.status === 429) { await sleep(1500 * (i + 1)); continue; }
+        throw last;
+      }
+      const clean = (d.text || "").replace(/```json|```/g, "").trim();
+      const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
+      if (s === -1 || e === -1) { last = new Error("رد غير مفهوم"); await sleep(1000); continue; }
+      return JSON.parse(clean.slice(s, e + 1));
+    } catch (err) { last = err; await sleep(1200 * (i + 1)); }
+  }
+  throw last || new Error("تعذّر التنفيذ");
+}
+
+// يقرأ الأسعار من الشيت المنشور بصيغة بيانات
+async function readSheet(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`تعذّر فتح الرابط (رمز ${r.status})`);
+  const text = await r.text();
+
+  const prices = {};
+  text.split(/\r?\n/).forEach(line => {
+    const cells = [];
+    let cur = "", q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { q = !q; continue; }
+      if (c === "," && !q) { cells.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    cells.push(cur);
+    const clean = cells.map(x => x.replace(/[$,"٪%\s]/g, "").trim());
+    const raw   = cells.map(x => x.trim());
+
+    let idx = -1;
+    for (let i = 0; i < raw.length; i++) {
+      const hit = KNOWN.find(k => k.toUpperCase() === raw[i].toUpperCase());
+      if (hit) { idx = i; break; }
+    }
+    if (idx === -1) return;
+    const ticker = KNOWN.find(k => k.toUpperCase() === raw[idx].toUpperCase());
+    const nums = clean.slice(idx + 1).map(parseFloat).filter(n => !isNaN(n));
+    // بعد الاسم: الكمية، التكلفة، إجمالي التكلفة، سعر السوق
+    if (nums.length >= 4) prices[ticker] = nums[3];
+    else if (nums.length >= 1) prices[ticker] = nums[nums.length - 1];
+  });
+
+  if (!Object.keys(prices).length) throw new Error("ما لقى أي سهم في الرابط");
+  return prices;
+}
+
+/* ═══════════════ التطبيق ═══════════════ */
+
+function App() {
+  const st = load(DATA_KEY, null);
+
+  const [holdings, setHoldings] = useState(st?.holdings || SEED);
+  const [cash, setCash]         = useState(st?.cash ?? 22359);
+  const [frozen, setFrozen]     = useState(st?.frozen || SEED.filter(h => FROZEN_DEFAULT.includes(h.ticker)).map(h => h.id));
+  const [cur, setCur]           = useState(st?.cur || "USD");
+  const [rate, setRate]         = useState(st?.rate ?? 3.2489);
+  const [returns, setReturns]   = useState(st?.returns || DEFAULT_RETURNS);
+  const [monthly, setMonthly]   = useState(st?.monthly ?? 15432);
+  const [live, setLive]         = useState(st?.live || null);
+
+  const [sheetUrl, setSheetUrl] = useState(load(SHEET_KEY, ""));
+  const [tab, setTab]           = useState("pitch");
+  const [editing, setEditing]   = useState(null);
+  const [setup, setSetup]       = useState(false);
+  const [syncing, setSyncing]   = useState(false);
+  const [msg, setMsg]           = useState(null);
+
+  useEffect(() => {
+    save(DATA_KEY, { holdings, cash, frozen, cur, rate, returns, monthly, live });
+  }, [holdings, cash, frozen, cur, rate, returns, monthly, live]);
+
+  useEffect(() => { save(SHEET_KEY, sheetUrl); }, [sheetUrl]);
+
+  const M = useMemo(() => {
+    const sym = cur === "USD" ? "$" : "د.ك ";
+    return (v, d = 0) => sym + (cur === "USD" ? v : v / rate)
+      .toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+  }, [cur, rate]);
+
+  const rows = useMemo(() => holdings.map(h => {
+    const value = num(h.qty * h.price), basis = num(h.qty * h.cost);
+    return { ...h, value, basis, pl: value - basis, plPct: basis > 0 ? (value - basis) / basis : 0 };
+  }), [holdings]);
+
+  const invested = rows.reduce((s, r) => s + r.value, 0);
+  const total    = invested + cash;
+  const basis    = rows.reduce((s, r) => s + r.basis, 0);
+  const totalPL  = invested - basis;
+
+  const byLine = useMemo(() => {
+    const m = {};
+    ORDER.forEach(k => {
+      const list = rows.filter(r => r.line === k).sort((a, b) => b.value - a.value);
+      const v = list.reduce((s, r) => s + r.value, 0);
+      m[k] = { list, value: v, weight: total > 0 ? v / total : 0, gap: LINES[k].target * total - v };
+    });
+    return m;
+  }, [rows, total]);
+
+  const biggest = rows.reduce((a, b) => (b.value > (a?.value ?? 0) ? b : a), null);
+  const conc = biggest && total > 0 ? biggest.value / total : 0;
+  const drift = ORDER.reduce((s, k) => s + Math.abs(byLine[k].weight - LINES[k].target), 0);
+  const progress = Math.max(0, Math.min(1, 1 - drift / 1.2));
+
+  const flash = (ok, text) => { setMsg({ ok, text }); setTimeout(() => setMsg(null), 9000); };
+
+  const syncPrices = async () => {
+    if (!sheetUrl) { setSetup(true); return; }
+    setSyncing(true);
+    try {
+      const prices = await readSheet(sheetUrl);
+      let n = 0; const skip = [];
+      setHoldings(prev => prev.map(h => {
+        const p = prices[h.ticker];
+        if (typeof p === "number" && p > 0) {
+          if (h.price > 0 && Math.abs(p - h.price) / h.price > 0.6) { skip.push(h.ticker); return h; }
+          n++; return { ...h, price: p };
+        }
+        return h;
+      }));
+      flash(n > 0, n > 0
+        ? `تم تحديث ${n} سعر${skip.length ? ` · تُخطّي ${skip.join("، ")} لتغيّر مشبوه` : ""}`
+        : "ما قدر يقرأ أي سعر — تأكد من الرابط");
+    } catch (e) {
+      flash(false, e.message);
+    }
+    setSyncing(false);
+  };
+
+  const saveHolding = (h) => {
+    setHoldings(p => { const i = p.findIndex(x => x.id === h.id); if (i === -1) return [...p, h]; const c = [...p]; c[i] = h; return c; });
+    setEditing(null);
+  };
+  const removeHolding = (id) => { setHoldings(p => p.filter(x => x.id !== id)); setFrozen(f => f.filter(x => x !== id)); setEditing(null); };
+  const toggleFreeze = (id) => setFrozen(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
+
+  const TABS = [["pitch","التشكيلة"],["squad","المراكز"],["analysis","التحليل"],["livetab","تحليل حي"],["future","المستقبل"],["risk","الإنذار"],["plan","خطة الشراء"]];
+
+  return (
+    <div style={S.shell}>
+      <header style={S.header}>
+        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <Crest />
+          <div>
+            <h1 style={S.h1}>نادي المحفظة</h1>
+            <div style={S.sub}>موسم إعادة التوازن</div>
+          </div>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+          <button onClick={syncPrices} disabled={syncing} style={{ ...S.syncBtn, opacity: syncing ? 0.55 : 1 }}>
+            {syncing ? "⟳ جاري السحب…" : "⟳ أسعار الشيت"}
+          </button>
+          <button onClick={() => setSetup(true)} style={S.gearBtn}>⚙</button>
+          <div style={S.segment}>
+            {["USD","KWD"].map(c => (
+              <button key={c} onClick={() => setCur(c)} style={{ ...S.segBtn, ...(cur===c?S.segOn:{}) }}>
+                {c === "USD" ? "دولار" : "دينار"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </header>
+
+      <section style={S.board}>
+        <Stat label="قيمة المحفظة" value={M(total)} tone="#EAF3EC" />
+        <Stat label="الربح / الخسارة" value={(totalPL>=0?"+":"−")+M(Math.abs(totalPL))}
+              sub={basis>0 ? (totalPL>=0?"+":"−")+pct(Math.abs(totalPL/basis)) : "—"}
+              tone={totalPL>=0?"#37C793":"#E4574C"} />
+        <Stat label="السيولة الجاهزة" value={M(cash)} tone="#E5B143" />
+        <div style={S.statCard}>
+          <div style={S.label}>اكتمال إعادة التوازن</div>
+          <div style={{ ...S.statVal, color:"#EAF3EC" }}>{Math.round(progress*100)}%</div>
+          <div style={S.track}><div style={{ ...S.fill, width:`${progress*100}%` }} /></div>
+        </div>
+      </section>
+
+      {msg && (
+        <div style={{ maxWidth:1180, margin:"12px auto 0", padding:"0 16px" }}>
+          <div style={{ ...S.msgBox,
+            borderColor: msg.ok ? "rgba(55,199,147,0.3)" : "rgba(229,177,67,0.3)",
+            color:       msg.ok ? "#37C793" : "#E5B143",
+            background:  msg.ok ? "rgba(55,199,147,0.06)" : "rgba(229,177,67,0.06)" }}>
+            {msg.ok ? "✓ " : "⚠ "}{msg.text}
+          </div>
+        </div>
+      )}
+
+      <nav style={S.tabs}>
+        {TABS.map(([k,l]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ ...S.tab, ...(tab===k?S.tabOn:{}) }}>{l}</button>
+        ))}
+      </nav>
+
+      <main style={{ padding:"0 16px 70px", maxWidth:1180, margin:"0 auto" }}>
+        {tab==="pitch"    && <Pitch byLine={byLine} M={M} frozen={frozen} />}
+        {tab==="squad"    && <Squad rows={rows} byLine={byLine} M={M} frozen={frozen}
+                                    onEdit={setEditing} onFreeze={toggleFreeze}
+                                    onAdd={() => setEditing({ id:uid(), line:"mid", name:"", ticker:"", qty:0, cost:0, price:0, _new:true })}
+                                    cash={cash} setCash={setCash} rate={rate} setRate={setRate} />}
+        {tab==="analysis" && <Analysis rows={rows} byLine={byLine} M={M} biggest={biggest} conc={conc}
+                                       totalPL={totalPL} basis={basis} invested={invested} />}
+        {tab==="livetab"  && <Live rows={rows} live={live} setLive={setLive} returns={returns} setReturns={setReturns} />}
+        {tab==="future"   && <Future rows={rows} byLine={byLine} total={total} M={M}
+                                     returns={returns} setReturns={setReturns} monthly={monthly} setMonthly={setMonthly} />}
+        {tab==="risk"     && <RiskPanel rows={rows} byLine={byLine} total={total} M={M} frozen={frozen} live={live} />}
+        {tab==="plan"     && <Planner byLine={byLine} cash={cash} M={M} frozen={frozen} />}
+      </main>
+
+      {editing && <Editor h={editing} onSave={saveHolding} onCancel={() => setEditing(null)} onDelete={removeHolding} />}
+      {setup && <Setup url={sheetUrl} setUrl={setSheetUrl} onClose={() => setSetup(false)} />}
+
+      <footer style={S.footer}>البيانات محفوظة على جهازك · أداة متابعة شخصية وليست نصيحة استثمارية</footer>
+    </div>
+  );
+}
+
+/* ═══════════════ الإعداد ═══════════════ */
+function Setup({ url, setUrl, onClose }) {
+  const [v, setV] = useState(url);
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:600 }} onClick={e => e.stopPropagation()}>
+        <div style={S.mHead}>
+          <h3 style={S.mTitle}>ربط الشيت</h3>
+          <button onClick={onClose} style={S.close}>×</button>
+        </div>
+        <div style={S.hint}>
+          افتح الشيت في جوجل، ثم من القائمة:
+          <div style={{ margin:"10px 0", fontFamily:"'IBM Plex Mono',monospace", color:"#EAF3EC", fontSize:12.5, lineHeight:2 }}>
+            File → Share → Publish to web
+          </div>
+          اختر تبويب <b style={{color:"#EAF3EC"}}>Portfolio</b>، وحدد الصيغة
+          <b style={{color:"#EAF3EC"}}> Comma-separated values (.csv)</b>، ثم اضغط Publish وانسخ الرابط والصقه هنا.
+        </div>
+        <input value={v} onChange={e => setV(e.target.value)} placeholder="https://docs.google.com/…/pub?output=csv" style={S.input} />
+        <div style={{ ...S.dim, fontSize:11.5, marginTop:10, lineHeight:1.8 }}>
+          الرابط المنشور يعرض الأسعار فقط ولا يمنح أحدًا صلاحية التعديل على ملفك.
+        </div>
+        <div style={S.mActions}>
+          <div style={{ flex:1 }} />
+          <button onClick={onClose} style={S.ghost}>إلغاء</button>
+          <button onClick={() => { setUrl(v.trim()); onClose(); }} style={S.primary}>حفظ</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════ التشكيلة ═══════════════ */
+function Pitch({ byLine, M, frozen }) {
+  return (
+    <div style={S.card}>
+      <Head title="التشكيلة على أرض الملعب" note="حجم اللاعب يعكس وزنه · العلامة البيضاء هي الهدف" />
+      {ORDER.slice().reverse().map(k => {
+        const L = LINES[k], d = byLine[k];
+        const max = Math.max(...d.list.map(x => x.value), 1);
+        return (
+          <div key={k} style={S.row}>
+            <div style={S.rowMeta}>
+              <span style={{ ...S.badge, background:L.color }}>{L.short}</span>
+              <span style={S.weight}>{pct(d.weight)}</span>
+              <span style={S.dimSm}>الهدف {pct(L.target)}</span>
+            </div>
+            <div style={S.players}>
+              {!d.list.length && <div style={S.empty}>لا يوجد لاعبون</div>}
+              {d.list.map(h => {
+                const size = 42 + (h.value / max) * 44;
+                const fz = frozen.includes(h.id);
+                return (
+                  <div key={h.id} style={S.player}>
+                    <div style={{ ...S.jersey, width:size, height:size, borderColor:L.color, background:L.soft, opacity:fz?0.5:1 }}>
+                      <span style={{ ...S.jTicker, fontSize:size>68?11:9 }}>{h.ticker.slice(0,9)}</span>
+                      {fz && <span style={S.snow}>❄</span>}
+                    </div>
+                    <div style={S.pVal}>{M(h.value)}</div>
+                    <div style={S.pName}>{h.name}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={S.barTrack}>
+              <div style={{ ...S.barFill, width:`${Math.min(d.weight/0.9,1)*100}%`, background:L.color }} />
+              <div style={{ ...S.barMark, insetInlineStart:`${Math.min(L.target/0.9,1)*100}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════ المراكز ═══════════════ */
+function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, cash, setCash, rate, setRate }) {
+  return (
+    <React.Fragment>
+      <div style={{ ...S.card, marginBottom:16 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
+          <Head title="إدارة المراكز" note="حدّث الكميات والمتوسط بعد كل شراء" flush />
+          <button onClick={onAdd} style={S.primary}>+ ضم لاعب</button>
+        </div>
+        <div style={S.fields}>
+          <Field label="السيولة النقدية (دولار)" value={cash} onChange={v => setCash(num(parseFloat(v)))} />
+          <Field label="سعر صرف الدينار" value={rate} step="0.0001" onChange={v => setRate(num(parseFloat(v))||1)} />
+        </div>
+      </div>
+
+      {ORDER.map(k => {
+        const L = LINES[k], d = byLine[k];
+        return (
+          <div key={k} style={{ ...S.card, marginBottom:14, borderInlineStartColor:L.color }}>
+            <div style={S.sHead}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+                <span style={{ ...S.badge, background:L.color }}>{L.name}</span>
+                <span style={S.weightSm}>{pct(d.weight)} <span style={S.dim}>من {pct(L.target)}</span></span>
+              </div>
+              <div style={S.mono16}>{M(d.value)}</div>
+            </div>
+            <div style={{ overflowX:"auto" }}>
+              <table style={S.table}>
+                <thead><tr>{["اللاعب","الكمية","التكلفة","السعر","القيمة","الربح/الخسارة",""].map(h => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {d.list.map(h => {
+                    const fz = frozen.includes(h.id);
+                    return (
+                      <tr key={h.id} style={{ opacity:fz?0.58:1 }}>
+                        <td style={S.td}>
+                          <div style={{ fontWeight:600, color:"#EAF3EC" }}>{h.name}</div>
+                          <div style={S.tag}>{h.ticker}{fz && " · مجمّد"}</div>
+                        </td>
+                        <td style={S.tdN}>{h.qty.toLocaleString("en-US",{maximumFractionDigits:2})}</td>
+                        <td style={S.tdN}>{h.cost.toFixed(2)}</td>
+                        <td style={S.tdN}>{h.price.toFixed(2)}</td>
+                        <td style={{ ...S.tdN, color:"#EAF3EC", fontWeight:600 }}>{M(h.value)}</td>
+                        <td style={{ ...S.tdN, color:h.pl>=0?"#37C793":"#E4574C", fontWeight:600 }}>
+                          {(h.pl>=0?"+":"−")+M(Math.abs(h.pl))}
+                          <div style={{ fontSize:11, opacity:0.72 }}>{(h.pl>=0?"+":"−")+pct(Math.abs(h.plPct))}</div>
+                        </td>
+                        <td style={{ ...S.td, whiteSpace:"nowrap" }}>
+                          <button onClick={() => onEdit(h)} style={S.icon}>تعديل</button>
+                          <button onClick={() => onFreeze(h.id)} style={{ ...S.icon, color:fz?"#5EC8FF":"#6E8A7C" }}>{fz?"تشغيل":"تجميد"}</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/* ═══════════════ التحليل ═══════════════ */
+function Analysis({ rows, byLine, M, biggest, conc, totalPL, basis, invested }) {
+  const sorted = [...rows].sort((a,b) => b.pl - a.pl);
+  const win  = sorted.filter(r => r.pl > 0).slice(0,3);
+  const lose = sorted.filter(r => r.pl < 0).slice(-3).reverse();
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.pl)), 1);
+
+  return (
+    <React.Fragment>
+      {conc > RISK.conc && (
+        <div style={S.alert}>
+          <div style={{ fontSize:18, color:"#E5B143" }}>⚠</div>
+          <div>
+            <div style={S.alertT}>تركّز عالٍ في مركز واحد</div>
+            <div style={S.alertB}>
+              سهم <b style={{color:"#EAF3EC"}}>{biggest.name}</b> يشكّل وحده {pct(conc)} من إجمالي المحفظة —
+              أي أن هذي النسبة من أدائك مرتبطة بشركة واحدة.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={S.card}>
+        <Head title="الوزن الحالي مقابل الهدف" note="الفجوة تُظهر ما يحتاجه كل خط" />
+        {ORDER.map(k => {
+          const L = LINES[k], d = byLine[k], over = d.weight > L.target;
+          return (
+            <div key={k} style={S.gapRow}>
+              <div style={S.gapName}><span style={{ ...S.dot, background:L.color }} />{L.name}</div>
+              <div style={{ flex:1, minWidth:110 }}>
+                <div style={S.barTrack}>
+                  <div style={{ ...S.barFill, width:`${Math.min(d.weight/0.9,1)*100}%`, background:L.color }} />
+                  <div style={{ ...S.barMark, insetInlineStart:`${Math.min(L.target/0.9,1)*100}%` }} />
+                </div>
+              </div>
+              <div style={S.gapN}><b style={{color:"#EAF3EC"}}>{pct(d.weight)}</b><span style={S.dim}> / {pct(L.target)}</span></div>
+              <div style={{ ...S.gapA, color:over?"#E4574C":"#37C793" }}>
+                {over ? `فائض ${M(Math.abs(d.gap))}` : `يحتاج ${M(Math.abs(d.gap))}`}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={S.grid2}>
+        <div style={S.card}>
+          <Head title="أفضل ثلاثة" />
+          {win.map(r => <PLRow key={r.id} r={r} max={maxAbs} M={M} />)}
+          {!win.length && <div style={S.empty}>لا توجد مراكز رابحة</div>}
+        </div>
+        <div style={S.card}>
+          <Head title="أضعف ثلاثة" />
+          {lose.map(r => <PLRow key={r.id} r={r} max={maxAbs} M={M} />)}
+          {!lose.length && <div style={S.empty}>لا توجد مراكز خاسرة</div>}
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <Head title="ملخص الأداء" />
+        <div style={S.sumGrid}>
+          <Sum label="رأس المال المستثمر" value={M(basis)} />
+          <Sum label="القيمة السوقية" value={M(invested)} />
+          <Sum label="صافي الربح/الخسارة" value={(totalPL>=0?"+":"−")+M(Math.abs(totalPL))} tone={totalPL>=0?"#37C793":"#E4574C"} />
+          <Sum label="العائد على التكلفة" value={basis>0?(totalPL>=0?"+":"−")+pct(Math.abs(totalPL/basis)):"—"} tone={totalPL>=0?"#37C793":"#E4574C"} />
+          <Sum label="عدد المراكز" value={rows.filter(r => r.qty > 0).length} />
+          <Sum label="أكبر مركز" value={biggest ? `${biggest.ticker} · ${pct(conc)}` : "—"} />
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+function PLRow({ r, max, M }) {
+  const up = r.pl >= 0;
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:12, padding:"9px 0" }}>
+      <div style={{ minWidth:92 }}>
+        <div style={{ color:"#EAF3EC", fontWeight:600, fontSize:12.5 }}>{r.ticker}</div>
+        <div style={{ ...S.dim, fontSize:11 }}>{LINES[r.line].short}</div>
+      </div>
+      <div style={{ flex:1, height:6, background:"rgba(255,255,255,0.055)", borderRadius:4, overflow:"hidden" }}>
+        <div style={{ height:"100%", width:`${(Math.abs(r.pl)/max)*100}%`, background:up?"#37C793":"#E4574C" }} />
+      </div>
+      <div style={{ fontFamily:MONO, fontSize:12.5, color:up?"#37C793":"#E4574C", fontWeight:600, minWidth:88, textAlign:"left" }}>
+        {(up?"+":"−")+M(Math.abs(r.pl))}
+      </div>
+    </div>
+  );
+}
+
+function Sum({ label, value, tone = "#EAF3EC" }) {
+  return (
+    <div style={{ background:"rgba(0,0,0,0.18)", borderRadius:10, padding:"12px 14px" }}>
+      <div style={S.label}>{label}</div>
+      <div style={{ fontFamily:MONO, fontSize:16.5, fontWeight:600, color:tone, marginTop:4 }}>{value}</div>
+    </div>
+  );
+}
+
+/* ═══════════════ التحليل الحي ═══════════════ */
+function Live({ rows, live, setLive, returns, setReturns }) {
+  const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState("");
+  const [err, setErr]   = useState("");
+
+  const run = async () => {
+    setBusy(true); setErr("");
+    const result = { at: new Date().toISOString(), lines:{}, holdings:{}, macro:null };
+    const bad = [];
+
+    setStep("أبحث عن حالة الأسواق…");
+    try {
+      result.macro = await ask(
+`ابحث في الويب عن آخر أخبار الأسواق المالية اليوم: الأسواق الأمريكية، بورصة الكويت، سوق أبوظبي، الذهب، والبيتكوين.
+أرجع JSON فقط بدون نص إضافي:
+{"summary":"٣ أسطر بالعربية عن حالة الأسواق الآن","themes":["عامل ١","عامل ٢","عامل ٣"],"sources":["مصدر ١","مصدر ٢"]}`);
+    } catch(e){ bad.push("نظرة السوق"); }
+
+    for (const k of ORDER) {
+      const list = rows.filter(r => r.line === k && r.qty > 0);
+      if (!list.length) continue;
+      setStep(`أحلل ${LINES[k].name}…`);
+      const names = list.map(r => `${r.name} (${r.ticker})`).join("، ");
+      try {
+        const out = await ask(
+`ابحث في الويب عن آخر الأخبار وتقارير المحللين لهذه الأسهم: ${names}.
+السياق: أسهم ضمن خط "${LINES[k].name}"، ودوره: ${LINE_ROLE[k]}. المستثمر يلتزم بالأسهم المتوافقة مع الضوابط الشرعية.
+أرجع JSON فقط بدون نص إضافي، بالعربية وبإيجاز:
+{"expectedReturn": رقم العائد السنوي المتوقع لهذا الخط كنسبة مئوية,
+"rationale":"سطر يشرح أساس الرقم",
+"holdings":[{"ticker":"الرمز","outlook":"سطر","risk":"high|medium|low","catalyst":"تطور حديث","concern":"أبرز مخاطرة"}],
+"sources":["مصدر"]}`);
+        result.lines[k] = out;
+        (out.holdings||[]).forEach(h => { if (h?.ticker) result.holdings[h.ticker] = h; });
+      } catch(e){ bad.push(LINES[k].name); }
+      await sleep(400);
+    }
+
+    if (result.macro || Object.keys(result.lines).length) {
+      setLive(result);
+      if (bad.length) setErr(`اكتمل جزئيًا. تعذّر: ${bad.join("، ")}`);
+    } else {
+      setErr("تعذّر إتمام التحليل — تأكد أن المفتاح مضبوط في إعدادات المشروع.");
+    }
+    setStep(""); setBusy(false);
+  };
+
+  const applyReturns = () => {
+    const next = { ...returns };
+    ORDER.forEach(k => {
+      const r = live?.lines?.[k]?.expectedReturn;
+      if (typeof r === "number" && r > -50 && r < 100) next[k] = r/100;
+    });
+    setReturns(next);
+  };
+
+  const hasRates = live && ORDER.some(k => typeof live.lines?.[k]?.expectedReturn === "number");
+
+  return (
+    <React.Fragment>
+      <div style={S.card}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+          <Head title="التحليل الحي من السوق" note="يبحث في الويب عن آخر الأخبار والتحليلات" flush />
+          <button onClick={run} disabled={busy} style={{ ...S.liveBtn, opacity:busy?0.55:1 }}>
+            {busy ? "جاري التحليل…" : live ? "↻ تحديث" : "▶ ابدأ التحليل"}
+          </button>
+        </div>
+        {busy && (
+          <div style={S.progress}>
+            <div style={S.spinner} />
+            <div>
+              <div style={{ color:"#EAF3EC", fontSize:13 }}>{step}</div>
+              <div style={{ ...S.dim, fontSize:11.5, marginTop:3 }}>يستغرق دقيقة إلى دقيقتين</div>
+            </div>
+          </div>
+        )}
+        {err && <div style={S.err}>{err}</div>}
+        {live && !busy && (
+          <div style={{ ...S.dim, fontSize:11.5, marginTop:14 }}>
+            آخر تحليل: {new Date(live.at).toLocaleString("ar",{dateStyle:"medium",timeStyle:"short"})}
+          </div>
+        )}
+      </div>
+
+      {!live && !busy && (
+        <div style={{ ...S.card, textAlign:"center", padding:44 }}>
+          <div style={{ fontSize:30, marginBottom:12 }}>📡</div>
+          <div style={{ fontFamily:DISPLAY, fontSize:16, fontWeight:700, color:"#EAF3EC", marginBottom:8 }}>ما فيه تحليل بعد</div>
+          <div style={{ ...S.dim, fontSize:12.5, lineHeight:1.9, maxWidth:440, margin:"0 auto" }}>
+            اضغط «ابدأ التحليل» ليبحث عن آخر أخبار وتقارير المحللين لكل سهم، ويستخرج العائد المتوقع لكل خط من معطيات السوق.
+          </div>
+        </div>
+      )}
+
+      {live?.macro && (
+        <div style={S.card}>
+          <Head title="حالة الأسواق الآن" />
+          <div style={{ fontSize:13.5, color:"#C9DACF", lineHeight:2 }}>{live.macro.summary}</div>
+          {live.macro.themes?.length > 0 && (
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:14 }}>
+              {live.macro.themes.map((t,i) => <span key={i} style={S.themeChip}>{t}</span>)}
+            </div>
+          )}
+          {live.macro.sources?.length > 0 &&
+            <div style={{ ...S.dim, fontSize:11, marginTop:14 }}>المصادر: {live.macro.sources.join(" · ")}</div>}
+        </div>
+      )}
+
+      {hasRates && (
+        <div style={{ ...S.card, borderInlineStartColor:"#37C793" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+            <Head title="العوائد المتوقعة من السوق" note="مستخرجة من تقارير المحللين" flush />
+            <button onClick={applyReturns} style={S.primary}>تطبيقها على التوقعات</button>
+          </div>
+          <div style={{ ...S.retGrid, marginTop:18, marginBottom:0 }}>
+            {ORDER.map(k => {
+              const d = live.lines?.[k]; if (!d) return null;
+              return (
+                <div key={k} style={{ ...S.retCard, borderInlineStartColor:LINES[k].color }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:8 }}>
+                    <span style={{ ...S.dot, background:LINES[k].color }} />
+                    <span style={{ fontSize:12.5, color:"#C9DACF" }}>{LINES[k].name}</span>
+                  </div>
+                  <div style={{ fontFamily:MONO, fontSize:23, fontWeight:600, color:"#EAF3EC" }}>
+                    {typeof d.expectedReturn === "number" ? d.expectedReturn.toFixed(1)+"٪" : "—"}
+                  </div>
+                  {d.rationale && <div style={{ ...S.dim, fontSize:11, marginTop:7, lineHeight:1.75 }}>{d.rationale}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {live && ORDER.map(k => {
+        const d = live.lines?.[k];
+        if (!d?.holdings?.length) return null;
+        return (
+          <div key={k} style={{ ...S.card, borderInlineStartColor:LINES[k].color }}>
+            <div style={{ marginBottom:16 }}><span style={{ ...S.badge, background:LINES[k].color }}>{LINES[k].name}</span></div>
+            {d.holdings.map((h,i) => {
+              const rc = h.risk==="high"?"#E4574C":h.risk==="medium"?"#E5B143":"#37C793";
+              const rl = h.risk==="high"?"مخاطرة عالية":h.risk==="medium"?"مخاطرة متوسطة":"مخاطرة منخفضة";
+              const match = rows.find(r => r.ticker === h.ticker);
+              return (
+                <div key={i} style={S.liveItem}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:9 }}>
+                    <span style={{ fontWeight:700, color:"#EAF3EC", fontSize:14 }}>{match?.name || h.ticker}</span>
+                    <span style={S.tag}>{h.ticker}</span>
+                    <span style={{ ...S.sevTag, background:rc+"1A", color:rc, borderColor:rc+"50" }}>{rl}</span>
+                  </div>
+                  {h.outlook && <div style={{ fontSize:12.8, color:"#C9DACF", lineHeight:1.9, marginBottom:10 }}>{h.outlook}</div>}
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:10 }}>
+                    {h.catalyst && (
+                      <div style={{ ...S.planBox, borderInlineStart:"2px solid #37C793" }}>
+                        <div style={{ fontSize:10.5, color:"#37C793", marginBottom:4 }}>تطوّر حديث</div>
+                        <div style={{ fontSize:12, color:"#A8BFB0", lineHeight:1.8 }}>{h.catalyst}</div>
+                      </div>
+                    )}
+                    {h.concern && (
+                      <div style={{ ...S.planBox, borderInlineStart:"2px solid #E4574C" }}>
+                        <div style={{ fontSize:10.5, color:"#E4574C", marginBottom:4 }}>أبرز مخاطرة</div>
+                        <div style={{ fontSize:12, color:"#A8BFB0", lineHeight:1.8 }}>{h.concern}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {d.sources?.length > 0 && <div style={{ ...S.dim, fontSize:11, marginTop:12 }}>المصادر: {d.sources.join(" · ")}</div>}
+          </div>
+        );
+      })}
+
+      {live && (
+        <div style={S.disc}>
+          <b style={{ color:"#E5B143" }}>قبل ما تبني قرارًا على هذا</b>
+          <div style={{ marginTop:8 }}>
+            تحليل مُجمَّع من مصادر عامة — قد يحتوي أخطاء أو معلومات متأخرة، وقد تتناقض المصادر.
+            راجعها بنفسك، وتأكد من التوافق الشرعي من مرجعك المعتمد لأن التصنيفات تتغير.
+            العوائد المتوقعة تقديرات محللين وليست وعودًا، والقرار قرارك.
+          </div>
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
+
+/* ═══════════════ المستقبل ═══════════════ */
+function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonthly }) {
+  const [scen, setScen] = useState("base");
+  const mult = SCENARIOS[scen].mult;
+
+  const proj = useMemo(() => HORIZONS.map(y => {
+    const lines = {}; let sum = 0;
+    ORDER.forEach(k => {
+      const v = fv(byLine[k].value, returns[k]*mult, y, monthly*LINES[k].target);
+      lines[k] = v; sum += v;
+    });
+    return { years:y, lines, total:sum, invested: total + monthly*12*y };
+  }), [byLine, returns, mult, monthly, total]);
+
+  const maxT = Math.max(...proj.map(p => p.total), 1);
+
+  return (
+    <React.Fragment>
+      <div style={S.card}>
+        <Head title="افتراضات النمو" note="عدّلها يدويًا أو اسحبها من السوق عبر تبويب «تحليل حي»" />
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:18 }}>
+          {Object.entries(SCENARIOS).map(([k,s]) => (
+            <button key={k} onClick={() => setScen(k)}
+              style={{ ...S.scenBtn, ...(scen===k?{background:s.color,color:"#08130E",borderColor:s.color,fontWeight:700}:{}) }}>
+              {s.name}
+            </button>
+          ))}
+        </div>
+        <div style={S.retGrid}>
+          {ORDER.map(k => (
+            <div key={k} style={{ ...S.retCard, borderInlineStartColor:LINES[k].color }}>
+              <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:7 }}>
+                <span style={{ ...S.dot, background:LINES[k].color }} />
+                <span style={{ fontSize:12.5, color:"#C9DACF" }}>{LINES[k].name}</span>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <input type="number" step="0.5" value={(returns[k]*100).toFixed(1)}
+                  onChange={e => setReturns({ ...returns, [k]:(parseFloat(e.target.value)||0)/100 })}
+                  style={{ ...S.input, marginTop:0, width:80, textAlign:"center" }} />
+                <span style={S.dim}>٪ سنويًا</span>
+              </div>
+              <div style={{ ...S.dim, fontSize:11, marginTop:6 }}>
+                في هذا السيناريو: {((returns[k]*mult)*100).toFixed(1)}٪
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={S.fields}>
+          <Field label="الاستثمار الشهري (دولار)" value={monthly} onChange={v => setMonthly(num(parseFloat(v)))} />
+        </div>
+        <div style={{ ...S.dim, fontSize:11.5, marginTop:8 }}>
+          يُوزّع حسب نسب الخطة: ١٠٪ حارس · ٤٠٪ دفاع · ٣٠٪ وسط · ٢٠٪ هجوم
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <Head title="إلى أين تتجه المحفظة" note="رأس المال الحالي مضافًا له الاستثمار الشهري" />
+        {proj.map(p => {
+          const gain = p.total - p.invested;
+          return (
+            <div key={p.years} style={S.projRow}>
+              <div style={{ minWidth:50, textAlign:"center" }}>
+                <div style={{ fontFamily:MONO, fontSize:21, fontWeight:600, color:"#EAF3EC" }}>{p.years}</div>
+                <div style={{ ...S.dim, fontSize:10.5 }}>سنوات</div>
+              </div>
+              <div style={{ flex:1, minWidth:130 }}>
+                <div style={{ height:22, background:"rgba(255,255,255,0.05)", borderRadius:6, overflow:"hidden", display:"flex" }}>
+                  <div style={{ width:`${(p.invested/maxT)*100}%`, background:"rgba(140,163,150,0.45)" }} />
+                  <div style={{ width:`${(Math.max(0,gain)/maxT)*100}%`, background:SCENARIOS[scen].color }} />
+                </div>
+                <div style={{ display:"flex", gap:14, marginTop:6, fontSize:10.5, color:"#6E8A7C" }}>
+                  <span>■ رأس المال {M(p.invested)}</span>
+                  <span style={{ color:SCENARIOS[scen].color }}>■ الأرباح {M(gain)}</span>
+                </div>
+              </div>
+              <div style={{ textAlign:"left", minWidth:115 }}>
+                <div style={{ fontFamily:MONO, fontSize:17, fontWeight:600, color:"#EAF3EC" }}>{M(p.total)}</div>
+                <div style={{ fontFamily:MONO, fontSize:11, color:"#37C793" }}>×{(p.total/Math.max(total,1)).toFixed(1)} من اليوم</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={S.card}>
+        <Head title="التفصيل حسب الخط" />
+        <div style={{ overflowX:"auto" }}>
+          <table style={S.table}>
+            <thead><tr><th style={S.th}>الخط</th>{HORIZONS.map(y => <th key={y} style={S.th}>{y} سنة</th>)}</tr></thead>
+            <tbody>
+              {ORDER.map(k => (
+                <tr key={k}>
+                  <td style={S.td}><span style={{ ...S.dot, background:LINES[k].color, display:"inline-block", marginInlineEnd:7 }} />{LINES[k].short}</td>
+                  {proj.map(p => <td key={p.years} style={S.tdN}>{M(p.lines[k])}</td>)}
+                </tr>
+              ))}
+              <tr>
+                <td style={{ ...S.td, fontWeight:700, color:"#EAF3EC" }}>الإجمالي</td>
+                {proj.map(p => <td key={p.years} style={{ ...S.tdN, fontWeight:700, color:"#EAF3EC" }}>{M(p.total)}</td>)}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <Head title="التوقع لكل سهم" note="نمو المركز الحالي فقط بدون إضافات شهرية" />
+        <div style={{ overflowX:"auto" }}>
+          <table style={S.table}>
+            <thead><tr><th style={S.th}>السهم</th><th style={S.th}>اليوم</th>{[5,10,15].map(y => <th key={y} style={S.th}>{y} سنة</th>)}</tr></thead>
+            <tbody>
+              {rows.filter(r => r.value > 0).sort((a,b) => b.value - a.value).map(r => (
+                <tr key={r.id}>
+                  <td style={S.td}>
+                    <div style={{ fontWeight:600, color:"#EAF3EC" }}>{r.name}</div>
+                    <div style={S.tag}>{LINES[r.line].short} · {((returns[r.line]*mult)*100).toFixed(1)}٪</div>
+                  </td>
+                  <td style={S.tdN}>{M(r.value)}</td>
+                  {[5,10,15].map(y => <td key={y} style={{ ...S.tdN, color:"#B4C9BC" }}>{M(fv(r.value, returns[r.line]*mult, y, 0))}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={S.disc}>
+        <b style={{ color:"#E5B143" }}>كيف تقرأ هذي الأرقام</b>
+        <div style={{ marginTop:8 }}>
+          هذي حسابات رياضية لافتراضات، وليست توقعًا لما سيحدث. الأسواق لا تنمو بنسبة ثابتة —
+          ترتفع وتنخفض وقد تمر بسنوات سالبة متتالية. استخدمها لمقارنة السيناريوهات ولفهم أثر الاستمرار في الاستثمار المنتظم، لا كوعد برقم.
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ═══════════════ الإنذار ═══════════════ */
+function RiskPanel({ rows, byLine, total, M, frozen, live }) {
+  const alerts = useMemo(() => {
+    const list = [];
+
+    rows.filter(r => r.value > 0).forEach(r => {
+      const h = live?.holdings?.[r.ticker];
+      if (h?.risk === "high") list.push({
+        sev:"high", ticker:r.ticker, live:true,
+        title:"مخاطرة عالية في آخر تحليل من السوق",
+        fact: h.concern || h.outlook || "رُصدت مخاطرة مرتفعة.",
+        plan: h.catalyst ? `آخر تطوّر: ${h.catalyst}` : "افتح تبويب «تحليل حي» للتفاصيل والمصادر.",
+      });
+    });
+
+    rows.filter(r => r.value > 0).forEach(r => {
+      const w = total > 0 ? r.value/total : 0;
+      const L = LINES[r.line];
+
+      if (w > RISK.conc) list.push({
+        sev:"high", ticker:r.ticker,
+        title:"تركّز مرتفع في مركز واحد",
+        fact:`يشكّل ${pct(w)} من إجمالي المحفظة.`,
+        plan: frozen.includes(r.id)
+          ? "خطتك تعالج التركّز بتجميد الضخ لا بالبيع — وهذا مطبّق حاليًا."
+          : "خطتك تعالج التركّز بتجميد الضخ لا بالبيع. فكّر في تجميده من تبويب المراكز.",
+      });
+
+      if (r.plPct <= -RISK.deep) list.push({
+        sev:"high", ticker:r.ticker,
+        title:"خسارة غير محققة عميقة",
+        fact:`أقل من متوسط تكلفتك بـ ${pct(Math.abs(r.plPct))} — بفارق ${M(Math.abs(r.pl))}.`,
+        plan:`الأسئلة التي تحدد الإجابة: هل تغيّرت أساسيات الشركة أم أن السوق كله نزل؟ ولو لم تكن تملكه اليوم، هل كنت ستشتريه بهذا السعر؟ دور خط ${L.short} في خطتك: ${LINE_ROLE[r.line].split("الدور:")[1] || ""}`,
+      });
+      else if (r.plPct <= -RISK.watch) list.push({
+        sev:"mid", ticker:r.ticker,
+        title:"تحت المراقبة",
+        fact:`أقل من تكلفتك بـ ${pct(Math.abs(r.plPct))} (${M(Math.abs(r.pl))}).`,
+        plan:"ضمن نطاق التقلب الطبيعي، لكن يستحق متابعة أسباب الانخفاض.",
+      });
+    });
+
+    ORDER.forEach(k => {
+      const d = byLine[k], L = LINES[k], dev = d.weight - L.target;
+      if (Math.abs(dev) > RISK.drift) list.push({
+        sev: Math.abs(dev) > 0.25 ? "high" : "mid",
+        title:`انحراف ${L.name} عن هدفه`,
+        fact:`الوزن الحالي ${pct(d.weight)} مقابل هدف ${pct(L.target)}.`,
+        plan: dev > 0
+          ? `الخط متضخم بمقدار ${M(Math.abs(d.gap))}. خطتك تعالجه بتجميد الضخ وتوجيه السيولة للخطوط الناقصة، لا بالبيع.`
+          : `الخط ناقص بمقدار ${M(Math.abs(d.gap))}. خطة الشراء توجّه له حصة أكبر مؤقتًا.`,
+      });
+    });
+
+    return list.sort((a,b) => (a.sev==="high"?0:1) - (b.sev==="high"?0:1));
+  }, [rows, byLine, total, frozen, live, M]);
+
+  const high = alerts.filter(a => a.sev==="high").length;
+  const mid  = alerts.filter(a => a.sev==="mid").length;
+
+  return (
+    <React.Fragment>
+      <div style={S.card}>
+        <Head title="حالة الإنذار" note="مبني على بيانات محفظتك ونتائج التحليل الحي" />
+        <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
+          <div style={{ ...S.sevBox, borderColor: high?"rgba(228,87,76,0.35)":"rgba(255,255,255,0.08)" }}>
+            <div style={{ fontFamily:MONO, fontSize:26, fontWeight:600, color: high?"#E4574C":"#4A6255" }}>{high}</div>
+            <div style={S.label}>يحتاج انتباهك</div>
+          </div>
+          <div style={{ ...S.sevBox, borderColor: mid?"rgba(229,177,67,0.3)":"rgba(255,255,255,0.08)" }}>
+            <div style={{ fontFamily:MONO, fontSize:26, fontWeight:600, color: mid?"#E5B143":"#4A6255" }}>{mid}</div>
+            <div style={S.label}>تحت المراقبة</div>
+          </div>
+        </div>
+      </div>
+
+      {!alerts.length && (
+        <div style={{ ...S.card, textAlign:"center", padding:40 }}>
+          <div style={{ fontSize:30, marginBottom:10 }}>✓</div>
+          <div style={{ color:"#37C793", fontFamily:DISPLAY, fontSize:16, fontWeight:700 }}>لا توجد تنبيهات</div>
+        </div>
+      )}
+
+      {alerts.map((a,i) => {
+        const c = a.sev==="high" ? "#E4574C" : "#E5B143";
+        return (
+          <div key={i} style={{ ...S.card, borderInlineStartColor:c, marginBottom:14 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:12 }}>
+              <span style={{ ...S.sevTag, background:c+"1F", color:c, borderColor:c+"55" }}>{a.sev==="high"?"انتباه":"مراقبة"}</span>
+              <span style={{ fontFamily:DISPLAY, fontSize:15, fontWeight:700, color:"#EAF3EC" }}>{a.title}</span>
+              {a.ticker && <span style={S.tag}>{a.ticker}</span>}
+              {a.live && <span style={S.liveTag}>● حي</span>}
+            </div>
+            <div style={{ fontSize:13, color:"#C9DACF", lineHeight:1.85, marginBottom:12 }}>{a.fact}</div>
+            <div style={S.planBox}>
+              <div style={{ fontSize:11, color:"#6E8A7C", marginBottom:5 }}>ماذا تقول خطتك</div>
+              <div style={{ fontSize:12.5, color:"#A8BFB0", lineHeight:1.85 }}>{a.plan}</div>
+            </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/* ═══════════════ خطة الشراء ═══════════════ */
+function Planner({ byLine, cash, M, frozen }) {
+  const [amount, setAmount] = useState(cash);
+  const [mode, setMode] = useState("rebal");
+  const split = mode==="rebal" ? REBAL : NORMAL;
+
+  return (
+    <React.Fragment>
+      <div style={S.card}>
+        <Head title="موزّع السيولة" note="أدخل المبلغ ليُقسَّم على الخطوط والأسهم" />
+        <div style={S.fields}>
+          <Field label="المبلغ المتاح (دولار)" value={amount} onChange={v => setAmount(num(parseFloat(v)))} />
+          <div style={{ display:"flex", flexDirection:"column", minWidth:190, flex:1 }}>
+            <span style={S.label}>وضع التوزيع</span>
+            <div style={{ ...S.segment, marginTop:6 }}>
+              <button onClick={() => setMode("rebal")}  style={{ ...S.segBtn, ...(mode==="rebal"?S.segOn:{}) }}>إعادة توازن</button>
+              <button onClick={() => setMode("normal")} style={{ ...S.segBtn, ...(mode==="normal"?S.segOn:{}) }}>نسب الخطة</button>
+            </div>
+          </div>
+        </div>
+        <div style={S.modeNote}>
+          {mode==="rebal"
+            ? "خط الدفاع مجمّد بالكامل، وحصته موزّعة على الحارس والوسط والهجوم لتسريع الوصول للنسب المستهدفة."
+            : "النسب الأصلية: ١٠٪ حارس · ٤٠٪ دفاع · ٣٠٪ وسط · ٢٠٪ هجوم."}
+          <div style={{ marginTop:8, paddingTop:8, borderTop:"1px solid rgba(255,255,255,0.07)" }}>
+            داخل خط الحارس: الذهب ٧٠٪ وبيتك ريت ٣٠٪. باقي الخطوط تتوزع بالتساوي.
+          </div>
+        </div>
+      </div>
+
+      {ORDER.map(k => {
+        const L = LINES[k];
+        const alloc = amount * split[k];
+        const active = byLine[k].list.filter(h => !frozen.includes(h.id));
+        const custom = active.filter(h => INNER[h.ticker] != null);
+        const rest   = active.filter(h => INNER[h.ticker] == null);
+        const cSum   = custom.reduce((s,h) => s + INNER[h.ticker], 0);
+        const left   = Math.max(0, 1 - cSum);
+        const shareOf = (h) => INNER[h.ticker] != null
+          ? (rest.length === 0 && cSum > 0 ? INNER[h.ticker]/cSum : INNER[h.ticker])
+          : (rest.length ? left/rest.length : 0);
+
+        return (
+          <div key={k} style={{ ...S.card, marginBottom:14, borderInlineStartColor:L.color }}>
+            <div style={S.sHead}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+                <span style={{ ...S.badge, background:L.color }}>{L.name}</span>
+                <span style={S.dim}>{pct(split[k])} من المبلغ</span>
+              </div>
+              <div style={{ ...S.mono16, color: alloc>0?"#EAF3EC":"#4A6255" }}>{M(alloc)}</div>
+            </div>
+            {alloc === 0 ? (
+              <div style={S.frozenNote}>مجمّد خلال فترة إعادة التوازن — لا شراء جديد</div>
+            ) : !active.length ? (
+              <div style={S.empty}>لا يوجد لاعبون نشطون</div>
+            ) : (
+              <div style={S.buyGrid}>
+                {active.map(h => {
+                  const sh = shareOf(h), amt = alloc * sh;
+                  return (
+                    <div key={h.id} style={S.chip}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:6 }}>
+                        <span style={{ color:"#EAF3EC", fontWeight:600, fontSize:12.5 }}>{h.ticker}</span>
+                        <span style={{ ...S.dim, fontSize:10.5 }}>{h.name}</span>
+                      </div>
+                      <div style={S.buyAmt}>{M(amt)}</div>
+                      <div style={{ ...S.dim, fontSize:10.5, fontFamily:MONO }}>
+                        {(sh*100).toFixed(0)}٪ من الخط{h.price>0 && `  ·  ≈ ${(amt/h.price).toFixed(2)} وحدة`}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/* ═══════════════ المحرر ═══════════════ */
+function Editor({ h, onSave, onCancel, onDelete }) {
+  const [f, setF] = useState(h);
+  const set = (k,v) => setF(p => ({ ...p, [k]:v }));
+  const valid = f.name.trim() && f.ticker.trim();
+  return (
+    <div style={S.overlay} onClick={onCancel}>
+      <div style={S.modal} onClick={e => e.stopPropagation()}>
+        <div style={S.mHead}>
+          <h3 style={S.mTitle}>{f._new ? "ضم لاعب جديد" : "تعديل المركز"}</h3>
+          <button onClick={onCancel} style={S.close}>×</button>
+        </div>
+        <div style={S.formGrid}>
+          <div style={{ display:"flex", flexDirection:"column", gridColumn:"1 / -1" }}>
+            <span style={S.label}>الخط</span>
+            <div style={{ display:"flex", gap:6, marginTop:6, flexWrap:"wrap" }}>
+              {ORDER.map(k => (
+                <button key={k} onClick={() => set("line",k)}
+                  style={{ ...S.lineBtn, ...(f.line===k?{background:LINES[k].color,color:"#08130E",borderColor:LINES[k].color,fontWeight:700}:{}) }}>
+                  {LINES[k].short}
+                </button>
+              ))}
+            </div>
+          </div>
+          <Field label="الاسم"  text value={f.name}   onChange={v => set("name",v)} />
+          <Field label="الرمز"  text value={f.ticker} onChange={v => set("ticker",v)} />
+          <Field label="عدد الأسهم"    value={f.qty}   step="any" onChange={v => set("qty",num(parseFloat(v)))} />
+          <Field label="سعر التكلفة"   value={f.cost}  step="any" onChange={v => set("cost",num(parseFloat(v)))} />
+          <Field label="السعر الحالي"  value={f.price} step="any" onChange={v => set("price",num(parseFloat(v)))} />
+        </div>
+        <div style={S.preview}>
+          <span style={S.label}>القيمة السوقية</span>
+          <span style={{ fontFamily:MONO, fontSize:19, color:"#EAF3EC", fontWeight:600 }}>
+            ${num(f.qty*f.price).toLocaleString("en-US",{maximumFractionDigits:2})}
+          </span>
+        </div>
+        <div style={S.mActions}>
+          {!f._new && <button onClick={() => onDelete(f.id)} style={S.danger}>حذف</button>}
+          <div style={{ flex:1 }} />
+          <button onClick={onCancel} style={S.ghost}>إلغاء</button>
+          <button onClick={() => valid && onSave({ ...f, _new:undefined })} style={{ ...S.primary, opacity:valid?1:0.4 }}>حفظ</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════ عناصر ═══════════════ */
+function Field({ label, value, onChange, step, text }) {
+  return (
+    <label style={{ display:"flex", flexDirection:"column", minWidth:160, flex:1 }}>
+      <span style={S.label}>{label}</span>
+      <input type={text?"text":"number"} step={step} value={value}
+             onChange={e => onChange(e.target.value)} style={S.input} />
+    </label>
+  );
+}
+
+function Stat({ label, value, sub, tone }) {
+  return (
+    <div style={S.statCard}>
+      <div style={S.label}>{label}</div>
+      <div style={{ ...S.statVal, color:tone }}>{value}</div>
+      {sub && <div style={{ ...S.dim, fontSize:11.5, marginTop:2, fontFamily:MONO }}>{sub}</div>}
+    </div>
+  );
+}
+
+function Head({ title, note, flush }) {
+  return (
+    <div style={{ marginBottom: flush?0:18 }}>
+      <h2 style={S.h2}>{title}</h2>
+      {note && <div style={S.note}>{note}</div>}
+    </div>
+  );
+}
+
+function Crest() {
+  return (
+    <svg width="38" height="42" viewBox="0 0 42 46" fill="none">
+      <path d="M21 2L39 8v16c0 10-7.6 17.4-18 20C10.6 41.4 3 34 3 24V8L21 2z" stroke="#E5B143" strokeWidth="1.6" fill="rgba(229,177,67,0.07)" />
+      <circle cx="21" cy="21" r="7.5" stroke="#37C793" strokeWidth="1.4" />
+      <path d="M21 13.5v15M13.5 21h15" stroke="#37C793" strokeWidth="1.1" opacity="0.5" />
+    </svg>
+  );
+}
+
+
+/* ═══════════════ الأنماط ═══════════════ */
+const AR = "'IBM Plex Sans Arabic', system-ui, sans-serif";
+const DISPLAY = "'Almarai', system-ui, sans-serif";
+const MONO = "'IBM Plex Mono', monospace";
+
+const S = {
+  shell:{ minHeight:"100vh", background:"radial-gradient(1200px 600px at 70% -10%, #123024 0%, #0A1712 55%, #070F0C 100%)", fontFamily:AR, color:"#C9DACF" },
+  header:{ maxWidth:1180, margin:"0 auto", padding:"20px 16px 14px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" },
+  h1:{ fontFamily:DISPLAY, fontSize:23, fontWeight:800, color:"#EAF3EC", margin:0 },
+  sub:{ fontSize:12, color:"#6E8A7C", marginTop:3 },
+  board:{ maxWidth:1180, margin:"0 auto", padding:"0 16px", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(165px,1fr))", gap:12 },
+  statCard:{ background:"rgba(255,255,255,0.028)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:12, padding:"14px 16px" },
+  label:{ fontSize:11.5, color:"#6E8A7C", fontWeight:500 },
+  statVal:{ fontFamily:MONO, fontWeight:600, fontSize:24, marginTop:5, letterSpacing:"-0.02em" },
+  track:{ height:4, background:"rgba(255,255,255,0.07)", borderRadius:4, marginTop:10, overflow:"hidden" },
+  fill:{ height:"100%", background:"linear-gradient(90deg,#37C793,#E5B143)", borderRadius:4, transition:"width .5s" },
+  tabs:{ maxWidth:1180, margin:"20px auto 16px", padding:"0 16px", display:"flex", gap:6, flexWrap:"wrap" },
+  tab:{ background:"transparent", border:"1px solid rgba(255,255,255,0.09)", color:"#7E9A8B", padding:"8px 16px", borderRadius:999, fontSize:13, transition:"all .18s" },
+  tabOn:{ background:"#EAF3EC", color:"#0A1712", borderColor:"#EAF3EC", fontWeight:700 },
+  card:{ background:"rgba(255,255,255,0.026)", border:"1px solid rgba(255,255,255,0.065)", borderInlineStartWidth:3, borderInlineStartColor:"rgba(255,255,255,0.09)", borderInlineStartStyle:"solid", borderRadius:14, padding:18, marginBottom:16 },
+  h2:{ fontFamily:DISPLAY, fontSize:16, fontWeight:700, color:"#EAF3EC", margin:0 },
+  note:{ fontSize:12, color:"#6E8A7C", marginTop:4 },
+  dim:{ color:"#6E8A7C" },
+  dimSm:{ fontSize:11.5, color:"#5B7568" },
+  row:{ padding:"16px 0", borderBottom:"1px dashed rgba(255,255,255,0.07)" },
+  rowMeta:{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" },
+  badge:{ color:"#08130E", fontSize:11.5, fontWeight:700, padding:"3px 11px", borderRadius:999 },
+  weight:{ fontFamily:MONO, fontSize:15, color:"#EAF3EC", fontWeight:600 },
+  weightSm:{ fontFamily:MONO, fontSize:13, color:"#B4C9BC" },
+  players:{ display:"flex", gap:14, flexWrap:"wrap", alignItems:"flex-end", minHeight:56 },
+  player:{ textAlign:"center", width:86 },
+  jersey:{ borderRadius:"50%", border:"1.5px solid", display:"grid", placeItems:"center", margin:"0 auto 7px", position:"relative" },
+  jTicker:{ fontFamily:MONO, fontWeight:600, color:"#EAF3EC", letterSpacing:"-0.03em" },
+  snow:{ position:"absolute", top:-2, insetInlineEnd:-2, fontSize:10, color:"#5EC8FF" },
+  pVal:{ fontFamily:MONO, fontSize:11.5, color:"#B4C9BC", fontWeight:500 },
+  pName:{ fontSize:10.5, color:"#5B7568", marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  empty:{ fontSize:12.5, color:"#4A6255", fontStyle:"italic", padding:"10px 0" },
+  barTrack:{ position:"relative", height:6, background:"rgba(255,255,255,0.055)", borderRadius:4, marginTop:14 },
+  barFill:{ height:"100%", borderRadius:4, transition:"width .5s" },
+  barMark:{ position:"absolute", top:-3, width:2, height:12, background:"#EAF3EC", opacity:0.8, borderRadius:2 },
+  sHead:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, gap:12, flexWrap:"wrap" },
+  mono16:{ fontFamily:MONO, fontSize:15.5, color:"#EAF3EC", fontWeight:600 },
+  table:{ fontSize:13 },
+  th:{ textAlign:"right", padding:"8px 10px", fontSize:11, color:"#5B7568", fontWeight:500, borderBottom:"1px solid rgba(255,255,255,0.07)", whiteSpace:"nowrap" },
+  td:{ padding:"11px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)", color:"#B4C9BC" },
+  tdN:{ padding:"11px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)", fontFamily:MONO, color:"#B4C9BC", whiteSpace:"nowrap" },
+  tag:{ fontSize:10.5, color:"#5B7568", fontFamily:MONO, marginTop:2 },
+  icon:{ background:"transparent", border:"1px solid rgba(255,255,255,0.1)", color:"#8CA396", padding:"4px 10px", borderRadius:7, fontSize:11.5, marginInlineStart:5 },
+  fields:{ display:"flex", gap:14, flexWrap:"wrap", marginTop:16 },
+  input:{ background:"rgba(0,0,0,0.28)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:9, padding:"10px 12px", color:"#EAF3EC", fontSize:14, marginTop:6, width:"100%", outlineColor:"#37C793" },
+  primary:{ background:"#EAF3EC", color:"#0A1712", border:"none", padding:"9px 18px", borderRadius:9, fontSize:13, fontWeight:700 },
+  ghost:{ background:"transparent", color:"#8CA396", border:"1px solid rgba(255,255,255,0.12)", padding:"9px 16px", borderRadius:9, fontSize:13 },
+  danger:{ background:"rgba(228,87,76,0.1)", color:"#E4574C", border:"1px solid rgba(228,87,76,0.3)", padding:"9px 16px", borderRadius:9, fontSize:13 },
+  syncBtn:{ background:"rgba(94,200,255,0.1)", color:"#5EC8FF", border:"1px solid rgba(94,200,255,0.35)", padding:"8px 14px", borderRadius:9, fontSize:12.5, fontWeight:600 },
+  gearBtn:{ background:"transparent", color:"#8CA396", border:"1px solid rgba(255,255,255,0.12)", padding:"8px 12px", borderRadius:9, fontSize:14 },
+  liveBtn:{ background:"#37C793", color:"#08130E", border:"none", padding:"10px 20px", borderRadius:10, fontSize:13.5, fontWeight:700 },
+  msgBox:{ border:"1px solid", borderRadius:10, padding:"11px 15px", fontSize:12.5, lineHeight:1.75 },
+  alert:{ display:"flex", gap:14, background:"rgba(229,177,67,0.07)", border:"1px solid rgba(229,177,67,0.25)", borderRadius:12, padding:16, marginBottom:16 },
+  alertT:{ color:"#E5B143", fontWeight:700, fontSize:14, marginBottom:5, fontFamily:DISPLAY },
+  alertB:{ fontSize:12.8, color:"#A8BFB0", lineHeight:1.75 },
+  gapRow:{ display:"flex", alignItems:"center", gap:12, padding:"13px 0", borderBottom:"1px solid rgba(255,255,255,0.045)", flexWrap:"wrap" },
+  gapName:{ display:"flex", alignItems:"center", gap:8, minWidth:105, fontSize:13.5, color:"#C9DACF" },
+  dot:{ width:8, height:8, borderRadius:"50%", flexShrink:0 },
+  gapN:{ fontFamily:MONO, fontSize:12.5, minWidth:84, textAlign:"left" },
+  gapA:{ fontFamily:MONO, fontSize:12, minWidth:118, textAlign:"left" },
+  grid2:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(290px,1fr))", gap:16 },
+  sumGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:13 },
+  scenBtn:{ background:"transparent", border:"1px solid rgba(255,255,255,0.12)", color:"#8CA396", padding:"8px 20px", borderRadius:999, fontSize:13 },
+  retGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginBottom:16 },
+  retCard:{ background:"rgba(0,0,0,0.2)", border:"1px solid rgba(255,255,255,0.06)", borderInlineStartWidth:3, borderInlineStartStyle:"solid", borderRadius:10, padding:"13px 14px" },
+  projRow:{ display:"flex", alignItems:"center", gap:14, padding:"15px 0", borderBottom:"1px solid rgba(255,255,255,0.045)", flexWrap:"wrap" },
+  disc:{ background:"rgba(229,177,67,0.05)", border:"1px solid rgba(229,177,67,0.2)", borderRadius:12, padding:18, fontSize:12.8, color:"#A8BFB0", lineHeight:1.9, marginBottom:16 },
+  sevBox:{ background:"rgba(0,0,0,0.2)", border:"1px solid", borderRadius:11, padding:"14px 24px", textAlign:"center", minWidth:125 },
+  sevTag:{ fontSize:11, fontWeight:700, padding:"3px 11px", borderRadius:999, border:"1px solid" },
+  planBox:{ background:"rgba(0,0,0,0.22)", borderRadius:9, padding:"12px 14px" },
+  liveItem:{ padding:"14px 0", borderBottom:"1px solid rgba(255,255,255,0.045)" },
+  liveTag:{ fontSize:10, color:"#37C793", background:"rgba(55,199,147,0.12)", border:"1px solid rgba(55,199,147,0.3)", padding:"2px 9px", borderRadius:999 },
+  themeChip:{ fontSize:11.5, color:"#A8BFB0", background:"rgba(255,255,255,0.045)", border:"1px solid rgba(255,255,255,0.08)", padding:"5px 12px", borderRadius:999 },
+  progress:{ display:"flex", alignItems:"center", gap:14, marginTop:18, background:"rgba(0,0,0,0.22)", borderRadius:10, padding:"14px 16px" },
+  spinner:{ width:20, height:20, border:"2px solid rgba(55,199,147,0.25)", borderTopColor:"#37C793", borderRadius:"50%", animation:"spin .8s linear infinite", flexShrink:0 },
+  err:{ marginTop:12, fontSize:12.5, color:"#E4574C", background:"rgba(228,87,76,0.08)", border:"1px solid rgba(228,87,76,0.25)", borderRadius:8, padding:"10px 12px", lineHeight:1.7 },
+  modeNote:{ marginTop:16, fontSize:12.5, color:"#8CA396", lineHeight:1.8, background:"rgba(0,0,0,0.2)", borderRadius:9, padding:"12px 14px" },
+  frozenNote:{ fontSize:12.5, color:"#5EC8FF", background:"rgba(94,200,255,0.06)", border:"1px solid rgba(94,200,255,0.18)", borderRadius:9, padding:"11px 14px" },
+  buyGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))", gap:11 },
+  chip:{ background:"rgba(0,0,0,0.22)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:10, padding:"12px 14px" },
+  buyAmt:{ fontFamily:MONO, fontSize:17.5, color:"#EAF3EC", fontWeight:600, margin:"7px 0 3px" },
+  overlay:{ position:"fixed", inset:0, background:"rgba(4,10,8,0.82)", backdropFilter:"blur(3px)", display:"grid", placeItems:"center", padding:16, zIndex:50 },
+  modal:{ background:"#0E1F18", border:"1px solid rgba(255,255,255,0.1)", borderRadius:16, padding:22, width:"100%", maxWidth:520, maxHeight:"88vh", overflowY:"auto" },
+  mHead:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 },
+  mTitle:{ fontFamily:DISPLAY, fontSize:17.5, fontWeight:700, color:"#EAF3EC", margin:0 },
+  close:{ background:"transparent", border:"none", color:"#6E8A7C", fontSize:26, lineHeight:1, padding:0 },
+  formGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:14 },
+  lineBtn:{ flex:1, minWidth:58, background:"transparent", border:"1px solid rgba(255,255,255,0.12)", color:"#8CA396", padding:"8px 4px", borderRadius:8, fontSize:12.5 },
+  preview:{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"rgba(0,0,0,0.25)", borderRadius:10, padding:"14px 16px", margin:"18px 0" },
+  mActions:{ display:"flex", gap:9, alignItems:"center", flexWrap:"wrap", marginTop:18 },
+  hint:{ fontSize:12.8, color:"#A8BFB0", lineHeight:1.9, background:"rgba(0,0,0,0.22)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:10, padding:"14px 16px", marginBottom:14 },
+  segment:{ display:"flex", background:"rgba(0,0,0,0.28)", borderRadius:9, padding:3, gap:3 },
+  segBtn:{ background:"transparent", border:"none", color:"#7E9A8B", padding:"6px 13px", borderRadius:7, fontSize:12.5 },
+  segOn:{ background:"#EAF3EC", color:"#0A1712", fontWeight:700 },
+  footer:{ maxWidth:1180, margin:"0 auto", padding:"20px 16px 36px", fontSize:11.5, color:"#4A6255", textAlign:"center", borderTop:"1px solid rgba(255,255,255,0.05)" },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+</script>
+</body>
+</html>
