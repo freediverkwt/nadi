@@ -291,18 +291,30 @@ function App() {
     setSyncing(true);
     try {
       const prices = await readSheet(sheetUrl, holdings.map(h => h.ticker));
-      let n = 0; const skip = [];
-      setHoldings(prev => prev.map(h => {
+
+      // نحسب النتيجة أولًا ثم نحدّث الحالة — حتى تكون الرسالة دقيقة
+      let n = 0;
+      const skip = [], missing = [];
+
+      const next = holdings.map(h => {
         const p = prices[h.ticker];
         if (typeof p === "number" && p > 0) {
           if (h.price > 0 && Math.abs(p - h.price) / h.price > 0.6) { skip.push(h.ticker); return h; }
           n++; return { ...h, price: p };
         }
+        if (h.qty > 0) missing.push(h.ticker);
         return h;
-      }));
+      });
+
+      setHoldings(next);
+
+      const notes = [];
+      if (skip.length) notes.push(`تُخطّي ${skip.join("، ")} لتغيّر مشبوه`);
+      if (missing.length) notes.push(`ما وُجد في الورقة: ${missing.slice(0, 5).join("، ")}`);
+
       flash(n > 0, n > 0
-        ? `تم تحديث ${n} سعر${skip.length ? ` · تُخطّي ${skip.join("، ")} لتغيّر مشبوه` : ""}`
-        : "ما قدر يقرأ أي سعر — تأكد من الرابط");
+        ? `تم تحديث ${n} سعر${notes.length ? " · " + notes.join(" · ") : ""}`
+        : "ما تطابق أي سهم مع الورقة — تأكد أن الأسماء مطابقة للرموز في تبويب المراكز");
     } catch (e) {
       flash(false, e.message);
     }
