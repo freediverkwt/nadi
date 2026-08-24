@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -55,6 +56,8 @@ const NORMAL = { guard: 0.10, def: 0.40, mid: 0.30, att: 0.20 };
 const INNER = { "IAU": 0.70, "KFH RIET": 0.30 };
 
 const DEFAULT_RETURNS = { guard: 0.05, def: 0.07, mid: 0.10, att: 0.13 };
+// عائد التوزيعات السنوي التقديري لكل خط — منفصل عن نمو السعر
+const DEFAULT_YIELDS  = { guard: 0.03, def: 0.05, mid: 0.006, att: 0.00 };
 const SCENARIOS = {
   low:  { name: "متحفّظ", mult: 0.6, color: "#8CA396" },
   base: { name: "أساسي",  mult: 1.0, color: "#37C793" },
@@ -91,7 +94,7 @@ const SEED = [
   { id:"s18", line:"att",   name:"أوبر",           ticker:"UBER",               qty:87.14,   cost:74.3200,  price:78.80  },
 ];
 const FROZEN_DEFAULT = ["KFH","ZAIN","MABANE","SPUS","AGILITY GLOBAL","MKHAZEN","HUMENSOFT (FUTURE)"];
-const KNOWN = SEED.map(s => s.ticker);
+// الرموز تُشتق من مراكز المستخدم نفسه — تدعم أي محفظة
 
 /* ═══════════════ أدوات ═══════════════ */
 const uid   = () => "h" + Math.random().toString(36).slice(2, 9);
@@ -102,11 +105,33 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const load = (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
+// النمو السعري فقط
 function fv(principal, rate, years, pmt) {
   const rm = Math.pow(1 + rate, 1/12) - 1;
   const n = years * 12;
   const g = Math.pow(1 + rm, n);
   return principal * g + (rm > 0 ? pmt * ((g - 1) / rm) : pmt * n);
+}
+
+// النمو مع التوزيعات — يعيد {total, price, divs}
+// عند إعادة الاستثمار تُضاف التوزيعات لرأس المال وتنمو معه
+function fvWithYield(principal, rate, yieldRate, years, pmt, reinvest) {
+  const priceOnly = fv(principal, rate, years, pmt);
+
+  if (!yieldRate) return { total: priceOnly, price: priceOnly, divs: 0 };
+
+  if (reinvest) {
+    const total = fv(principal, rate + yieldRate, years, pmt);
+    return { total, price: priceOnly, divs: total - priceOnly };
+  }
+
+  // بدون إعادة استثمار: تُجمع التوزيعات نقدًا سنة بسنة دون نمو
+  let divs = 0;
+  for (let y = 1; y <= years; y++) {
+    const base = fv(principal, rate, y, pmt);
+    divs += base * yieldRate;
+  }
+  return { total: priceOnly + divs, price: priceOnly, divs };
 }
 
 // ينادي الوسيط على الخادم
@@ -135,10 +160,11 @@ async function ask(prompt, search = true, tries = 3) {
 }
 
 // يقرأ الأسعار من الشيت المنشور بصيغة بيانات
-async function readSheet(url) {
+async function readSheet(url, tickers) {
   let text = null;
   let lastErr = null;
 
+  // نجرب المسار المباشر أولًا، ثم وسيطًا يتجاوز قيود المتصفح
   const routes = [
     url,
     "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
@@ -148,15 +174,16 @@ async function readSheet(url) {
   for (const u of routes) {
     try {
       const r = await fetch(u, { cache: "no-store" });
-      if (!r.ok) { lastErr = new Error("رمز " + r.status); continue; }
+      if (!r.ok) { lastErr = new Error(`رمز ${r.status}`); continue; }
       const t = await r.text();
+      // نتأكد أن المحتوى فعلًا بيانات وليس صفحة خطأ
       if (t && t.length > 40 && !/^\s*</.test(t)) { text = t; break; }
       lastErr = new Error("المحتوى غير صالح");
     } catch (e) { lastErr = e; }
   }
 
   if (!text) throw new Error(
-    "تعذّر قراءة الرابط" + (lastErr ? " (" + lastErr.message + ")" : "") +
+    "تعذّر قراءة الرابط" + (lastErr ? ` (${lastErr.message})` : "") +
     " — تأكد أن الشيت منشور بصيغة CSV"
   );
 
@@ -174,17 +201,21 @@ async function readSheet(url) {
     const clean = cells.map(x => x.replace(/[$,"٪%\s]/g, "").trim());
     const raw   = cells.map(x => x.trim());
 
-    let idx = -1;
+    let idx = -1, ticker = null;
     for (let i = 0; i < raw.length; i++) {
-      const hit = KNOWN.find(k => k.toUpperCase() === raw[i].toUpperCase());
-      if (hit) { idx = i; break; }
+      const hit = tickers.find(k => k.trim().toUpperCase() === raw[i].toUpperCase());
+      if (hit) { idx = i; ticker = hit; break; }
     }
     if (idx === -1) return;
-    const ticker = KNOWN.find(k => k.toUpperCase() === raw[idx].toUpperCase());
+
     const nums = clean.slice(idx + 1).map(parseFloat).filter(n => !isNaN(n));
-    // بعد الاسم: الكمية، التكلفة، إجمالي التكلفة، سعر السوق
-    if (nums.length >= 4) prices[ticker] = nums[3];
-    else if (nums.length >= 1) prices[ticker] = nums[nums.length - 1];
+    if (!nums.length) return;
+
+    // ورقة أسعار بسيطة: الاسم ثم السعر
+    if (nums.length === 1) prices[ticker] = nums[0];
+    // الشيت الكامل: الكمية، التكلفة، إجمالي التكلفة، سعر السوق
+    else if (nums.length >= 4) prices[ticker] = nums[3];
+    else prices[ticker] = nums[nums.length - 1];
   });
 
   if (!Object.keys(prices).length) throw new Error("ما لقى أي سهم في الرابط");
@@ -203,6 +234,8 @@ function App() {
   const [rate, setRate]         = useState(st?.rate ?? 3.2489);
   const [returns, setReturns]   = useState(st?.returns || DEFAULT_RETURNS);
   const [monthly, setMonthly]   = useState(st?.monthly ?? 15432);
+  const [yields, setYields]     = useState(st?.yields || DEFAULT_YIELDS);
+  const [reinvest, setReinvest] = useState(st?.reinvest ?? true);
   const [live, setLive]         = useState(st?.live || null);
 
   const [sheetUrl, setSheetUrl] = useState(load(SHEET_KEY, ""));
@@ -210,11 +243,12 @@ function App() {
   const [editing, setEditing]   = useState(null);
   const [setup, setSetup]       = useState(false);
   const [syncing, setSyncing]   = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [msg, setMsg]           = useState(null);
 
   useEffect(() => {
-    save(DATA_KEY, { holdings, cash, frozen, cur, rate, returns, monthly, live });
-  }, [holdings, cash, frozen, cur, rate, returns, monthly, live]);
+    save(DATA_KEY, { holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest });
+  }, [holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest]);
 
   useEffect(() => { save(SHEET_KEY, sheetUrl); }, [sheetUrl]);
 
@@ -239,7 +273,8 @@ function App() {
     ORDER.forEach(k => {
       const list = rows.filter(r => r.line === k).sort((a, b) => b.value - a.value);
       const v = list.reduce((s, r) => s + r.value, 0);
-      m[k] = { list, value: v, weight: total > 0 ? v / total : 0, gap: LINES[k].target * total - v };
+      const b = list.reduce((s, r) => s + r.basis, 0);
+      m[k] = { list, value: v, basis: b, weight: total > 0 ? v / total : 0, gap: LINES[k].target * total - v };
     });
     return m;
   }, [rows, total]);
@@ -255,7 +290,7 @@ function App() {
     if (!sheetUrl) { setSetup(true); return; }
     setSyncing(true);
     try {
-      const prices = await readSheet(sheetUrl);
+      const prices = await readSheet(sheetUrl, holdings.map(h => h.ticker));
       let n = 0; const skip = [];
       setHoldings(prev => prev.map(h => {
         const p = prices[h.ticker];
@@ -313,6 +348,7 @@ function App() {
         <Stat label="الربح / الخسارة" value={(totalPL>=0?"+":"−")+M(Math.abs(totalPL))}
               sub={basis>0 ? (totalPL>=0?"+":"−")+pct(Math.abs(totalPL/basis)) : "—"}
               tone={totalPL>=0?"#37C793":"#E4574C"} />
+        <Stat label="إجمالي التكلفة" value={M(basis)} tone="#8CA396" />
         <Stat label="السيولة الجاهزة" value={M(cash)} tone="#E5B143" />
         <div style={S.statCard}>
           <div style={S.label}>اكتمال إعادة التوازن</div>
@@ -343,18 +379,32 @@ function App() {
         {tab==="squad"    && <Squad rows={rows} byLine={byLine} M={M} frozen={frozen}
                                     onEdit={setEditing} onFreeze={toggleFreeze}
                                     onAdd={() => setEditing({ id:uid(), line:"mid", name:"", ticker:"", qty:0, cost:0, price:0, _new:true })}
-                                    cash={cash} setCash={setCash} rate={rate} setRate={setRate} />}
+                                    onClear={() => setClearing(true)}
+                                    cash={cash} setCash={setCash} rate={rate} setRate={setRate}
+                                    totalBasis={basis} totalValue={invested} />}
         {tab==="analysis" && <Analysis rows={rows} byLine={byLine} M={M} biggest={biggest} conc={conc}
                                        totalPL={totalPL} basis={basis} invested={invested} />}
         {tab==="livetab"  && <Live rows={rows} live={live} setLive={setLive} returns={returns} setReturns={setReturns} />}
         {tab==="future"   && <Future rows={rows} byLine={byLine} total={total} M={M}
-                                     returns={returns} setReturns={setReturns} monthly={monthly} setMonthly={setMonthly} />}
+                                     returns={returns} setReturns={setReturns} monthly={monthly} setMonthly={setMonthly}
+                                     yields={yields} setYields={setYields} reinvest={reinvest} setReinvest={setReinvest} />}
         {tab==="risk"     && <RiskPanel rows={rows} byLine={byLine} total={total} M={M} frozen={frozen} live={live} />}
         {tab==="plan"     && <Planner byLine={byLine} cash={cash} M={M} frozen={frozen} />}
       </main>
 
       {editing && <Editor h={editing} onSave={saveHolding} onCancel={() => setEditing(null)} onDelete={removeHolding} />}
       {setup && <Setup url={sheetUrl} setUrl={setSheetUrl} onClose={() => setSetup(false)} />}
+      {clearing && (
+        <ConfirmClear
+          onCancel={() => setClearing(false)}
+          onConfirm={() => {
+            setHoldings(SEED.map(h => ({ ...h, qty: 0, cost: 0 })));
+            setCash(0);
+            setClearing(false);
+            flash(true, "تم التصفير — أدخل كمياتك ومتوسطك من زر تعديل");
+          }}
+        />
+      )}
 
       <footer style={S.footer}>البيانات محفوظة على جهازك · أداة متابعة شخصية وليست نصيحة استثمارية</footer>
     </div>
@@ -387,6 +437,33 @@ function Setup({ url, setUrl, onClose }) {
           <div style={{ flex:1 }} />
           <button onClick={onClose} style={S.ghost}>إلغاء</button>
           <button onClick={() => { setUrl(v.trim()); onClose(); }} style={S.primary}>حفظ</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════ تأكيد التصفير ═══════════════ */
+function ConfirmClear({ onConfirm, onCancel }) {
+  return (
+    <div style={S.overlay} onClick={onCancel}>
+      <div style={{ ...S.modal, maxWidth:460 }} onClick={e => e.stopPropagation()}>
+        <div style={S.mHead}>
+          <h3 style={S.mTitle}>البدء من الصفر</h3>
+          <button onClick={onCancel} style={S.close}>×</button>
+        </div>
+        <div style={{ fontSize:13.5, color:"#A8BFB0", lineHeight:1.9 }}>
+          يصفّر كل الكميات والمتوسطات والسيولة، ويبقي هيكل الخطوط وأسماء الأسهم كما هي
+          لتبدأ بإدخال بياناتك من جديد.
+          <div style={{ marginTop:10, color:"#8CA396", fontSize:12.5 }}>
+            مفيد إذا أردت إعطاء نسخة من اللوحة لشخص آخر يبدأ بمحفظته هو.
+          </div>
+          <div style={{ marginTop:12, color:"#E4574C", fontWeight:600 }}>لا يمكن التراجع.</div>
+        </div>
+        <div style={S.mActions}>
+          <div style={{ flex:1 }} />
+          <button onClick={onCancel} style={S.primary}>إلغاء</button>
+          <button onClick={onConfirm} style={S.danger}>نعم، صفّر</button>
         </div>
       </div>
     </div>
@@ -437,17 +514,38 @@ function Pitch({ byLine, M, frozen }) {
 }
 
 /* ═══════════════ المراكز ═══════════════ */
-function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, cash, setCash, rate, setRate }) {
+function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, onClear, cash, setCash, rate, setRate, totalBasis, totalValue }) {
   return (
     <React.Fragment>
       <div style={{ ...S.card, marginBottom:16 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
           <Head title="إدارة المراكز" note="حدّث الكميات والمتوسط بعد كل شراء" flush />
-          <button onClick={onAdd} style={S.primary}>+ ضم لاعب</button>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            <button onClick={onAdd} style={S.primary}>+ ضم لاعب</button>
+            <button onClick={onClear} style={S.resetBtn}>ابدأ من الصفر</button>
+          </div>
         </div>
         <div style={S.fields}>
           <Field label="السيولة النقدية (دولار)" value={cash} onChange={v => setCash(num(parseFloat(v)))} />
           <Field label="سعر صرف الدينار" value={rate} step="0.0001" onChange={v => setRate(num(parseFloat(v))||1)} />
+        </div>
+
+        <div style={S.costBar}>
+          <div style={S.costItem}>
+            <div style={S.label}>إجمالي تكلفة المحفظة</div>
+            <div style={{ fontFamily:MONO, fontSize:17, fontWeight:600, color:"#A8BFB0", marginTop:4 }}>{M(totalBasis)}</div>
+          </div>
+          <div style={S.costItem}>
+            <div style={S.label}>القيمة السوقية</div>
+            <div style={{ fontFamily:MONO, fontSize:17, fontWeight:600, color:"#EAF3EC", marginTop:4 }}>{M(totalValue)}</div>
+          </div>
+          <div style={S.costItem}>
+            <div style={S.label}>الفرق</div>
+            <div style={{ fontFamily:MONO, fontSize:17, fontWeight:600, marginTop:4,
+                          color: totalValue - totalBasis >= 0 ? "#37C793" : "#E4574C" }}>
+              {(totalValue - totalBasis >= 0 ? "+" : "−") + M(Math.abs(totalValue - totalBasis))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -460,11 +558,16 @@ function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, cash, setCash
                 <span style={{ ...S.badge, background:L.color }}>{L.name}</span>
                 <span style={S.weightSm}>{pct(d.weight)} <span style={S.dim}>من {pct(L.target)}</span></span>
               </div>
-              <div style={S.mono16}>{M(d.value)}</div>
+              <div style={{ textAlign:"left" }}>
+                <div style={S.mono16}>{M(d.value)}</div>
+                <div style={{ ...S.dim, fontSize:11.5, fontFamily:MONO, marginTop:2 }}>
+                  التكلفة {M(d.basis)}
+                </div>
+              </div>
             </div>
             <div style={{ overflowX:"auto" }}>
               <table style={S.table}>
-                <thead><tr>{["اللاعب","الكمية","التكلفة","السعر","القيمة","الربح/الخسارة",""].map(h => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+                <thead><tr>{["اللاعب","الكمية","متوسط التكلفة","إجمالي التكلفة","السعر الحالي","القيمة السوقية","الربح/الخسارة",""].map(h => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
                 <tbody>
                   {d.list.map(h => {
                     const fz = frozen.includes(h.id);
@@ -476,6 +579,7 @@ function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, cash, setCash
                         </td>
                         <td style={S.tdN}>{h.qty.toLocaleString("en-US",{maximumFractionDigits:2})}</td>
                         <td style={S.tdN}>{h.cost.toFixed(2)}</td>
+                        <td style={{ ...S.tdN, color:"#8CA396" }}>{M(h.basis)}</td>
                         <td style={S.tdN}>{h.price.toFixed(2)}</td>
                         <td style={{ ...S.tdN, color:"#EAF3EC", fontWeight:600 }}>{M(h.value)}</td>
                         <td style={{ ...S.tdN, color:h.pl>=0?"#37C793":"#E4574C", fontWeight:600 }}>
@@ -788,18 +892,21 @@ function Live({ rows, live, setLive, returns, setReturns }) {
 }
 
 /* ═══════════════ المستقبل ═══════════════ */
-function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonthly }) {
+function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonthly, yields, setYields, reinvest, setReinvest }) {
   const [scen, setScen] = useState("base");
   const mult = SCENARIOS[scen].mult;
 
   const proj = useMemo(() => HORIZONS.map(y => {
-    const lines = {}; let sum = 0;
+    const lines = {}; let sum = 0, divSum = 0;
     ORDER.forEach(k => {
-      const v = fv(byLine[k].value, returns[k]*mult, y, monthly*LINES[k].target);
-      lines[k] = v; sum += v;
+      const r = fvWithYield(byLine[k].value, returns[k]*mult, yields[k], y, monthly*LINES[k].target, reinvest);
+      lines[k] = r.total; sum += r.total; divSum += r.divs;
     });
-    return { years:y, lines, total:sum, invested: total + monthly*12*y };
-  }), [byLine, returns, mult, monthly, total]);
+    return { years:y, lines, total:sum, divs:divSum, invested: total + monthly*12*y };
+  }), [byLine, returns, yields, reinvest, mult, monthly, total]);
+
+  // الدخل السنوي من التوزيعات بالوضع الحالي
+  const annualIncome = ORDER.reduce((s,k) => s + byLine[k].value * yields[k], 0);
 
   const maxT = Math.max(...proj.map(p => p.total), 1);
 
@@ -829,7 +936,13 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
                 <span style={S.dim}>٪ سنويًا</span>
               </div>
               <div style={{ ...S.dim, fontSize:11, marginTop:6 }}>
-                في هذا السيناريو: {((returns[k]*mult)*100).toFixed(1)}٪
+                نمو فعلي: {((returns[k]*mult)*100).toFixed(1)}٪
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:9, paddingTop:9, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+                <input type="number" step="0.1" value={(yields[k]*100).toFixed(1)}
+                  onChange={e => setYields({ ...yields, [k]:(parseFloat(e.target.value)||0)/100 })}
+                  style={{ ...S.input, marginTop:0, width:72, textAlign:"center", fontSize:13 }} />
+                <span style={{ ...S.dim, fontSize:11 }}>٪ توزيعات</span>
               </div>
             </div>
           ))}
@@ -839,6 +952,26 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
         </div>
         <div style={{ ...S.dim, fontSize:11.5, marginTop:8 }}>
           يُوزّع حسب نسب الخطة: ١٠٪ حارس · ٤٠٪ دفاع · ٣٠٪ وسط · ٢٠٪ هجوم
+        </div>
+
+        <div style={S.divBox}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+            <div>
+              <div style={{ fontSize:12.5, color:"#C9DACF", fontWeight:600 }}>التوزيعات النقدية</div>
+              <div style={{ ...S.dim, fontSize:11.5, marginTop:4 }}>
+                الدخل المتوقع من محفظتك الحالية: <b style={{ color:"#37C793", fontFamily:MONO }}>{M(annualIncome)}</b> سنويًا
+              </div>
+            </div>
+            <div style={S.segment}>
+              <button onClick={() => setReinvest(true)}  style={{ ...S.segBtn, ...(reinvest?S.segOn:{}) }}>إعادة استثمار</button>
+              <button onClick={() => setReinvest(false)} style={{ ...S.segBtn, ...(!reinvest?S.segOn:{}) }}>سحب نقدي</button>
+            </div>
+          </div>
+          <div style={{ ...S.dim, fontSize:11.5, marginTop:10, lineHeight:1.8 }}>
+            {reinvest
+              ? "التوزيعات تُعاد لشراء مزيد من الأسهم فتنمو مع المحفظة — أثرها التراكمي كبير على المدى الطويل."
+              : "التوزيعات تُسحب نقدًا ولا تنمو — تُضاف للإجمالي كمبلغ متراكم فقط."}
+          </div>
         </div>
       </div>
 
@@ -855,11 +988,13 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
               <div style={{ flex:1, minWidth:130 }}>
                 <div style={{ height:22, background:"rgba(255,255,255,0.05)", borderRadius:6, overflow:"hidden", display:"flex" }}>
                   <div style={{ width:`${(p.invested/maxT)*100}%`, background:"rgba(140,163,150,0.45)" }} />
-                  <div style={{ width:`${(Math.max(0,gain)/maxT)*100}%`, background:SCENARIOS[scen].color }} />
+                  <div style={{ width:`${(Math.max(0,gain - p.divs)/maxT)*100}%`, background:SCENARIOS[scen].color }} />
+                  <div style={{ width:`${(Math.max(0,p.divs)/maxT)*100}%`, background:"#5EC8FF" }} />
                 </div>
-                <div style={{ display:"flex", gap:14, marginTop:6, fontSize:10.5, color:"#6E8A7C" }}>
+                <div style={{ display:"flex", gap:12, marginTop:6, fontSize:10.5, color:"#6E8A7C", flexWrap:"wrap" }}>
                   <span>■ رأس المال {M(p.invested)}</span>
-                  <span style={{ color:SCENARIOS[scen].color }}>■ الأرباح {M(gain)}</span>
+                  <span style={{ color:SCENARIOS[scen].color }}>■ نمو {M(Math.max(0, gain - p.divs))}</span>
+                  {p.divs > 0 && <span style={{ color:"#5EC8FF" }}>■ توزيعات {M(p.divs)}</span>}
                 </div>
               </div>
               <div style={{ textAlign:"left", minWidth:115 }}>
@@ -902,10 +1037,17 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
                 <tr key={r.id}>
                   <td style={S.td}>
                     <div style={{ fontWeight:600, color:"#EAF3EC" }}>{r.name}</div>
-                    <div style={S.tag}>{LINES[r.line].short} · {((returns[r.line]*mult)*100).toFixed(1)}٪</div>
+                    <div style={S.tag}>
+                      {LINES[r.line].short} · نمو {((returns[r.line]*mult)*100).toFixed(1)}٪
+                      {yields[r.line] > 0 && ` + توزيع ${(yields[r.line]*100).toFixed(1)}٪`}
+                    </div>
                   </td>
                   <td style={S.tdN}>{M(r.value)}</td>
-                  {[5,10,15].map(y => <td key={y} style={{ ...S.tdN, color:"#B4C9BC" }}>{M(fv(r.value, returns[r.line]*mult, y, 0))}</td>)}
+                  {[5,10,15].map(y => (
+                    <td key={y} style={{ ...S.tdN, color:"#B4C9BC" }}>
+                      {M(fvWithYield(r.value, returns[r.line]*mult, yields[r.line], y, 0, reinvest).total)}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -1246,9 +1388,13 @@ const S = {
   tdN:{ padding:"11px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)", fontFamily:MONO, color:"#B4C9BC", whiteSpace:"nowrap" },
   tag:{ fontSize:10.5, color:"#5B7568", fontFamily:MONO, marginTop:2 },
   icon:{ background:"transparent", border:"1px solid rgba(255,255,255,0.1)", color:"#8CA396", padding:"4px 10px", borderRadius:7, fontSize:11.5, marginInlineStart:5 },
+  costBar:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:12, marginTop:18,
+            background:"rgba(0,0,0,0.22)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:11, padding:"14px 16px" },
+  costItem:{ minWidth:0 },
   fields:{ display:"flex", gap:14, flexWrap:"wrap", marginTop:16 },
   input:{ background:"rgba(0,0,0,0.28)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:9, padding:"10px 12px", color:"#EAF3EC", fontSize:14, marginTop:6, width:"100%", outlineColor:"#37C793" },
   primary:{ background:"#EAF3EC", color:"#0A1712", border:"none", padding:"9px 18px", borderRadius:9, fontSize:13, fontWeight:700 },
+  resetBtn:{ background:"transparent", color:"#8A6D6D", border:"1px solid rgba(228,87,76,0.22)", padding:"9px 16px", borderRadius:9, fontSize:13 },
   ghost:{ background:"transparent", color:"#8CA396", border:"1px solid rgba(255,255,255,0.12)", padding:"9px 16px", borderRadius:9, fontSize:13 },
   danger:{ background:"rgba(228,87,76,0.1)", color:"#E4574C", border:"1px solid rgba(228,87,76,0.3)", padding:"9px 16px", borderRadius:9, fontSize:13 },
   syncBtn:{ background:"rgba(94,200,255,0.1)", color:"#5EC8FF", border:"1px solid rgba(94,200,255,0.35)", padding:"8px 14px", borderRadius:9, fontSize:12.5, fontWeight:600 },
@@ -1265,6 +1411,7 @@ const S = {
   gapA:{ fontFamily:MONO, fontSize:12, minWidth:118, textAlign:"left" },
   grid2:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(290px,1fr))", gap:16 },
   sumGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:13 },
+  divBox:{ marginTop:16, background:"rgba(94,200,255,0.05)", border:"1px solid rgba(94,200,255,0.18)", borderRadius:10, padding:"14px 16px" },
   scenBtn:{ background:"transparent", border:"1px solid rgba(255,255,255,0.12)", color:"#8CA396", padding:"8px 20px", borderRadius:999, fontSize:13 },
   retGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginBottom:16 },
   retCard:{ background:"rgba(0,0,0,0.2)", border:"1px solid rgba(255,255,255,0.06)", borderInlineStartWidth:3, borderInlineStartStyle:"solid", borderRadius:10, padding:"13px 14px" },
