@@ -102,7 +102,16 @@ const num   = (n) => (isFinite(n) ? n : 0);
 const pct   = (v) => (v * 100).toFixed(1) + "%";
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const PASS_KEY = "nadi-pass";
+// المستخدم يُقرأ من الرابط: ‏?u=ahmad
+const USER = (function () {
+  try {
+    const u = new URLSearchParams(location.search).get("u");
+    return (u || "owner").trim().toLowerCase();
+  } catch { return "owner"; }
+})();
+
+const IS_OWNER = USER === "owner";
+const PASS_KEY = "nadi-pass-" + USER;
 
 // حفظ كلمة المرور في المتصفح حتى لا تُطلب كل مرة
 const getPass = () => { try { return sessionStorage.getItem(PASS_KEY) || localStorage.getItem(PASS_KEY) || ""; } catch { return ""; } };
@@ -116,7 +125,10 @@ const clearPass = () => { try { localStorage.removeItem(PASS_KEY); sessionStorag
 
 // جلب البيانات من الخادم
 async function cloudGet(pass) {
-  const r = await fetch("/api/data", { headers: { "x-nadi-pass": pass }, cache: "no-store" });
+  const r = await fetch("/api/data?u=" + encodeURIComponent(USER), {
+    headers: { "x-nadi-pass": pass, "x-nadi-user": USER },
+    cache: "no-store"
+  });
   if (r.status === 401) throw new Error("AUTH");
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "رمز " + r.status); }
   const j = await r.json();
@@ -125,9 +137,13 @@ async function cloudGet(pass) {
 
 // حفظ البيانات على الخادم
 async function cloudSet(pass, data) {
-  const r = await fetch("/api/data", {
+  const r = await fetch("/api/data?u=" + encodeURIComponent(USER), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-nadi-pass": pass },
+    headers: {
+      "Content-Type": "application/json",
+      "x-nadi-pass": pass,
+      "x-nadi-user": USER
+    },
     body: JSON.stringify({ data })
   });
   if (r.status === 401) throw new Error("AUTH");
@@ -281,7 +297,13 @@ function Gate({ onOk }) {
       <div style={{ width:"100%", maxWidth:380, textAlign:"center" }}>
         <div style={{ marginBottom:22 }}><Crest /></div>
         <h1 style={{ ...S.h1, marginBottom:6 }}>نادي المحفظة</h1>
-        <div style={{ ...S.sub, marginBottom:28 }}>أدخل كلمة المرور للمتابعة</div>
+        <div style={{ ...S.sub, marginBottom:6 }}>أدخل كلمة المرور للمتابعة</div>
+        {!IS_OWNER && (
+          <div style={{ fontSize:12, color:"#37C793", marginBottom:22, fontFamily:MONO }}>
+            {USER}
+          </div>
+        )}
+        {IS_OWNER && <div style={{ marginBottom:22 }} />}
 
         <input
           type="password"
@@ -316,8 +338,12 @@ function Gate({ onOk }) {
 function App({ pass, onLogout }) {
   const st = load(DATA_KEY, null);
 
-  const [holdings, setHoldings] = useState(st?.holdings || SEED);
-  const [cash, setCash]         = useState(st?.cash ?? 22359);
+  // الضيف يبدأ بنفس هيكل الخطوط والأسهم لكن بكميات صفر
+  const BLANK = SEED.map(h => ({ ...h, qty: 0, cost: 0 }));
+  const START = IS_OWNER ? SEED : BLANK;
+
+  const [holdings, setHoldings] = useState(st?.holdings || START);
+  const [cash, setCash]         = useState(st?.cash ?? (IS_OWNER ? 22359 : 0));
   const [frozen, setFrozen]     = useState(st?.frozen || SEED.filter(h => FROZEN_DEFAULT.includes(h.ticker)).map(h => h.id));
   const [cur, setCur]           = useState(st?.cur || "USD");
   const [rate, setRate]         = useState(st?.rate ?? 3.2489);
@@ -480,7 +506,10 @@ function App({ pass, onLogout }) {
           <Crest />
           <div>
             <h1 style={S.h1}>نادي المحفظة</h1>
-            <div style={S.sub}>موسم إعادة التوازن</div>
+            <div style={S.sub}>
+              موسم إعادة التوازن
+              {!IS_OWNER && <span style={{ color:"#37C793", fontFamily:MONO }}> · {USER}</span>}
+            </div>
           </div>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
