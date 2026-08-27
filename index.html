@@ -102,6 +102,39 @@ const num   = (n) => (isFinite(n) ? n : 0);
 const pct   = (v) => (v * 100).toFixed(1) + "%";
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+const PASS_KEY = "nadi-pass";
+
+// حفظ كلمة المرور في المتصفح حتى لا تُطلب كل مرة
+const getPass = () => { try { return sessionStorage.getItem(PASS_KEY) || localStorage.getItem(PASS_KEY) || ""; } catch { return ""; } };
+const setPass = (p, remember) => {
+  try {
+    if (remember) localStorage.setItem(PASS_KEY, p);
+    else { localStorage.removeItem(PASS_KEY); sessionStorage.setItem(PASS_KEY, p); }
+  } catch {}
+};
+const clearPass = () => { try { localStorage.removeItem(PASS_KEY); sessionStorage.removeItem(PASS_KEY); } catch {} };
+
+// جلب البيانات من الخادم
+async function cloudGet(pass) {
+  const r = await fetch("/api/data", { headers: { "x-nadi-pass": pass }, cache: "no-store" });
+  if (r.status === 401) throw new Error("AUTH");
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "رمز " + r.status); }
+  const j = await r.json();
+  return j.data;
+}
+
+// حفظ البيانات على الخادم
+async function cloudSet(pass, data) {
+  const r = await fetch("/api/data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-nadi-pass": pass },
+    body: JSON.stringify({ data })
+  });
+  if (r.status === 401) throw new Error("AUTH");
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "رمز " + r.status); }
+  return true;
+}
+
 const load = (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
@@ -224,7 +257,63 @@ async function readSheet(url, tickers) {
 
 /* ═══════════════ التطبيق ═══════════════ */
 
-function App() {
+function Gate({ onOk }) {
+  const [p, setP] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (!p.trim()) return;
+    setBusy(true); setErr("");
+    try {
+      await cloudGet(p);
+      setPass(p, remember);
+      onOk(p);
+    } catch (e) {
+      setErr(e.message === "AUTH" ? "كلمة المرور غير صحيحة" : e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ ...S.shell, display:"grid", placeItems:"center", minHeight:"100vh", padding:20 }}>
+      <div style={{ width:"100%", maxWidth:380, textAlign:"center" }}>
+        <div style={{ marginBottom:22 }}><Crest /></div>
+        <h1 style={{ ...S.h1, marginBottom:6 }}>نادي المحفظة</h1>
+        <div style={{ ...S.sub, marginBottom:28 }}>أدخل كلمة المرور للمتابعة</div>
+
+        <input
+          type="password"
+          value={p}
+          onChange={e => setP(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          placeholder="كلمة المرور"
+          autoFocus
+          style={{ ...S.input, marginTop:0, textAlign:"center", fontSize:16, padding:"13px 14px" }}
+        />
+
+        <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, margin:"16px 0 20px", fontSize:12.5, color:"#8CA396", cursor:"pointer" }}>
+          <input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />
+          تذكّرني على هذا الجهاز
+        </label>
+
+        {err && <div style={{ ...S.err, marginBottom:16 }}>{err}</div>}
+
+        <button onClick={submit} disabled={busy || !p.trim()}
+          style={{ ...S.primary, width:"100%", padding:"13px", fontSize:14, opacity: busy || !p.trim() ? 0.5 : 1 }}>
+          {busy ? "جاري التحقق…" : "دخول"}
+        </button>
+
+        <div style={{ ...S.dim, fontSize:11, marginTop:24, lineHeight:1.8 }}>
+          بياناتك محفوظة على الخادم ومحمية بكلمة المرور
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App({ pass, onLogout }) {
   const st = load(DATA_KEY, null);
 
   const [holdings, setHoldings] = useState(st?.holdings || SEED);
@@ -246,11 +335,56 @@ function App() {
   const [clearing, setClearing] = useState(false);
   const [msg, setMsg]           = useState(null);
 
-  useEffect(() => {
-    save(DATA_KEY, { holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest });
-  }, [holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest]);
+  const [ready, setReady]       = useState(false);
+  const [cloudState, setCloud]  = useState("idle");
+  const first = useRef(true);
 
-  useEffect(() => { save(SHEET_KEY, sheetUrl); }, [sheetUrl]);
+  // جلب البيانات من الخادم عند الفتح
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await cloudGet(pass);
+        if (d) {
+          if (d.holdings) setHoldings(d.holdings);
+          if (typeof d.cash === "number") setCash(d.cash);
+          if (d.frozen) setFrozen(d.frozen);
+          if (d.cur) setCur(d.cur);
+          if (typeof d.rate === "number") setRate(d.rate);
+          if (d.returns) setReturns(d.returns);
+          if (typeof d.monthly === "number") setMonthly(d.monthly);
+          if (d.yields) setYields(d.yields);
+          if (typeof d.reinvest === "boolean") setReinvest(d.reinvest);
+          if (d.live) setLive(d.live);
+          if (typeof d.sheetUrl === "string") setSheetUrl(d.sheetUrl);
+        }
+      } catch (e) {
+        if (e.message === "AUTH") { onLogout(); return; }
+      }
+      setReady(true);
+    })();
+  }, []);
+
+  // الحفظ على الخادم مع نسخة محلية احتياطية
+  useEffect(() => {
+    if (!ready) return;
+    if (first.current) { first.current = false; return; }
+
+    const bundle = { holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl };
+    save(DATA_KEY, bundle);
+    save(SHEET_KEY, sheetUrl);
+
+    setCloud("saving");
+    const t = setTimeout(async () => {
+      try {
+        await cloudSet(pass, bundle);
+        setCloud("saved");
+        setTimeout(() => setCloud("idle"), 1600);
+      } catch (e) {
+        setCloud(e.message === "AUTH" ? "auth" : "error");
+      }
+    }, 700);
+    return () => clearTimeout(t);
+  }, [holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl, ready]);
 
   const M = useMemo(() => {
     const sym = cur === "USD" ? "$" : "د.ك ";
@@ -328,6 +462,15 @@ function App() {
   const removeHolding = (id) => { setHoldings(p => p.filter(x => x.id !== id)); setFrozen(f => f.filter(x => x !== id)); setEditing(null); };
   const toggleFreeze = (id) => setFrozen(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
 
+  if (!ready) return (
+    <div style={{ ...S.shell, display:"grid", placeItems:"center", minHeight:"100vh" }}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ ...S.spinner, margin:"0 auto 16px" }} />
+        <div style={{ color:"#6E8A7C", fontSize:13.5 }}>جاري تحميل محفظتك…</div>
+      </div>
+    </div>
+  );
+
   const TABS = [["pitch","التشكيلة"],["squad","المراكز"],["analysis","التحليل"],["livetab","تحليل حي"],["future","المستقبل"],["risk","الإنذار"],["plan","خطة الشراء"]];
 
   return (
@@ -344,7 +487,9 @@ function App() {
           <button onClick={syncPrices} disabled={syncing} style={{ ...S.syncBtn, opacity: syncing ? 0.55 : 1 }}>
             {syncing ? "⟳ جاري السحب…" : "⟳ أسعار الشيت"}
           </button>
+          <CloudBadge state={cloudState} />
           <button onClick={() => setSetup(true)} style={S.gearBtn}>⚙</button>
+          <button onClick={onLogout} style={S.gearBtn} title="خروج">⏻</button>
           <div style={S.segment}>
             {["USD","KWD"].map(c => (
               <button key={c} onClick={() => setCur(c)} style={{ ...S.segBtn, ...(cur===c?S.segOn:{}) }}>
@@ -1366,6 +1511,19 @@ function Head({ title, note, flush }) {
   );
 }
 
+function CloudBadge({ state }) {
+  const m = {
+    idle:   ["", "#4A6255"],
+    saving: ["يحفظ…", "#E5B143"],
+    saved:  ["محفوظ ✓", "#37C793"],
+    error:  ["تعذّر الحفظ", "#E4574C"],
+    auth:   ["انتهت الجلسة", "#E4574C"],
+  };
+  const [t, c] = m[state] || m.idle;
+  if (!t) return null;
+  return <span style={{ fontSize:11.5, color:c }}>{t}</span>;
+}
+
 function Crest() {
   return (
     <svg width="38" height="42" viewBox="0 0 42 46" fill="none">
@@ -1484,7 +1642,13 @@ const S = {
   footer:{ maxWidth:1180, margin:"0 auto", padding:"20px 16px 36px", fontSize:11.5, color:"#4A6255", textAlign:"center", borderTop:"1px solid rgba(255,255,255,0.05)" },
 };
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+function Root() {
+  const [pass, setP] = useState(getPass());
+  if (!pass) return <Gate onOk={setP} />;
+  return <App pass={pass} onLogout={() => { clearPass(); setP(""); }} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
 
 </script>
 </body>
