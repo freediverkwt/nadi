@@ -108,14 +108,27 @@ const USER_KEY = "nadi-user";
 
 const USER = (function () {
   try {
-    const fromUrl = new URLSearchParams(location.search).get("u");
-    if (fromUrl && fromUrl.trim()) {
-      const u = fromUrl.trim().toLowerCase();
+    // أولًا: رابط قديم بصيغة ?u=fahad — يبقى مدعومًا
+    const fromQuery = new URLSearchParams(location.search).get("u");
+    if (fromQuery && fromQuery.trim()) {
+      const u = fromQuery.trim().toLowerCase();
       localStorage.setItem(USER_KEY, u);
       return u;
     }
+
+    // ثانيًا: رابط بصيغة nadi-tawny.vercel.app/fahad — هذا يبقى ثابتًا حتى بعد
+    //    إضافة الصفحة للشاشة الرئيسية، لأن سفاري يحذف معاملات "?" هناك
+    const seg = location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
+    const reserved = ["", "api", "index.html", "manifest.json", "icon.svg"];
+    if (seg && !reserved.includes(seg) && !seg.includes("/") && !seg.includes(".")) {
+      localStorage.setItem(USER_KEY, seg);
+      return seg;
+    }
+
+    // ثالثًا: آخر مستخدم محفوظ بهذا الجهاز
     const saved = localStorage.getItem(USER_KEY);
     if (saved && saved.trim()) return saved.trim().toLowerCase();
+
     return "owner";
   } catch { return "owner"; }
 })();
