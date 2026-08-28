@@ -1407,7 +1407,7 @@ function RiskPanel({ rows, byLine, total, M, frozen, live }) {
 }
 
 /* ═══════════════ خطة الشراء ═══════════════ */
-function Planner({ byLine, cash, M, frozen }) {
+function Planner({ byLine, cash, M, frozen, cur, rate }) {
   const [amount, setAmount] = useState(cash);
   const [mode, setMode] = useState("rebal");
   const split = mode==="rebal" ? REBAL : NORMAL;
