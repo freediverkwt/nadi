@@ -482,9 +482,11 @@ function App({ pass, onLogout }) {
 
   const biggest = rows.reduce((a, b) => (b.value > (a?.value ?? 0) ? b : a), null);
   const conc = biggest && total > 0 ? biggest.value / total : 0;
-  const drift = ORDER.reduce((s, k) => s + Math.abs(byLine[k].weight - LINES[k].target), 0);
-  // الفارق الأقصى نظريًا هو ٢ (لا شيء في مكانه) — والمحفظة الفاضية تعني صفر تقدّم
-  const progress = total > 0 ? Math.max(0, Math.min(1, 1 - drift / 1.2)) : 0;
+    // نسبة التوازن تُقاس على المبلغ المستثمر فقط — الكاش غير الموزّع لا يدخل الحساب
+  const drift = invested > 0
+    ? ORDER.reduce((s, k) => s + Math.abs((byLine[k].value / invested) - LINES[k].target), 0)
+    : 0;
+  const progress = invested > 0 ? Math.max(0, Math.min(1, 1 - drift / 1.2)) : 0;
 
   const flash = (ok, text) => { setMsg({ ok, text }); setTimeout(() => setMsg(null), 9000); };
 
