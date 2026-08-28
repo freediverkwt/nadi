@@ -102,11 +102,21 @@ const num   = (n) => (isFinite(n) ? n : 0);
 const pct   = (v) => (v * 100).toFixed(1) + "%";
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// المستخدم يُقرأ من الرابط: ‏?u=ahmad
+// المستخدم يُقرأ من الرابط ‏?u=ahmad ثم يُحفظ محليًا
+// حتى يبقى صحيحًا إن فُقد من العنوان (كإضافة الصفحة للشاشة الرئيسية)
+const USER_KEY = "nadi-user";
+
 const USER = (function () {
   try {
-    const u = new URLSearchParams(location.search).get("u");
-    return (u || "owner").trim().toLowerCase();
+    const fromUrl = new URLSearchParams(location.search).get("u");
+    if (fromUrl && fromUrl.trim()) {
+      const u = fromUrl.trim().toLowerCase();
+      localStorage.setItem(USER_KEY, u);
+      return u;
+    }
+    const saved = localStorage.getItem(USER_KEY);
+    if (saved && saved.trim()) return saved.trim().toLowerCase();
+    return "owner";
   } catch { return "owner"; }
 })();
 
@@ -442,7 +452,8 @@ function App({ pass, onLogout }) {
   const biggest = rows.reduce((a, b) => (b.value > (a?.value ?? 0) ? b : a), null);
   const conc = biggest && total > 0 ? biggest.value / total : 0;
   const drift = ORDER.reduce((s, k) => s + Math.abs(byLine[k].weight - LINES[k].target), 0);
-  const progress = Math.max(0, Math.min(1, 1 - drift / 1.2));
+  // الفارق الأقصى نظريًا هو ٢ (لا شيء في مكانه) — والمحفظة الفاضية تعني صفر تقدّم
+  const progress = total > 0 ? Math.max(0, Math.min(1, 1 - drift / 1.2)) : 0;
 
   const flash = (ok, text) => { setMsg({ ok, text }); setTimeout(() => setMsg(null), 9000); };
 
@@ -575,7 +586,7 @@ function App({ pass, onLogout }) {
                                      returns={returns} setReturns={setReturns} monthly={monthly} setMonthly={setMonthly}
                                      yields={yields} setYields={setYields} reinvest={reinvest} setReinvest={setReinvest} />}
         {tab==="risk"     && <RiskPanel rows={rows} byLine={byLine} total={total} M={M} frozen={frozen} live={live} />}
-        {tab==="plan"     && <Planner byLine={byLine} cash={cash} M={M} frozen={frozen} />}
+        {tab==="plan"     && <Planner byLine={byLine} cash={cash} M={M} frozen={frozen} cur={cur} rate={rate} />}
       </main>
 
       {editing && <Editor h={editing} onSave={saveHolding} onCancel={() => setEditing(null)} onDelete={removeHolding} />}
@@ -1107,10 +1118,11 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
   const [scen, setScen] = useState("base");
   const mult = SCENARIOS[scen].mult;
 
+  // الحساب على نسب الخطة الدائمة — إعادة التوازن مرحلة عابرة لا تؤثر على المدى الطويل
   const proj = useMemo(() => HORIZONS.map(y => {
     const lines = {}; let sum = 0, divSum = 0;
     ORDER.forEach(k => {
-      const r = fvWithYield(byLine[k].value, returns[k]*mult, yields[k], y, monthly*LINES[k].target, reinvest);
+      const r = fvWithYield(byLine[k].value, returns[k]*mult, yields[k], y, monthly*NORMAL[k], reinvest);
       lines[k] = r.total; sum += r.total; divSum += r.divs;
     });
     return { years:y, lines, total:sum, divs:divSum, invested: total + monthly*12*y };
@@ -1161,8 +1173,18 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
         <div style={S.fields}>
           <Field label="الاستثمار الشهري (دولار)" value={monthly} onChange={v => setMonthly(num(parseFloat(v)))} />
         </div>
-        <div style={{ ...S.dim, fontSize:11.5, marginTop:8 }}>
-          يُوزّع حسب نسب الخطة: ١٠٪ حارس · ٤٠٪ دفاع · ٣٠٪ وسط · ٢٠٪ هجوم
+
+        <div style={S.phaseBox}>
+          <div style={{ fontSize:11.5, color:"#37C793", marginBottom:7, fontWeight:600 }}>
+            توزيع الاستثمار الشهري حسب الخطة
+          </div>
+          <div style={{ ...S.dim, fontSize:12.5, lineHeight:1.9, fontFamily:MONO }}>
+            {ORDER.map(k => `${LINES[k].short} ${(NORMAL[k]*100).toFixed(0)}٪`).join("  ·  ")}
+          </div>
+          <div style={{ ...S.dim, fontSize:11, marginTop:7, lineHeight:1.8 }}>
+            إعادة التوازن مرحلة عابرة لبضعة أشهر، ولا تُحتسب هنا لأن أثرها على المدى الطويل ضئيل.
+            توزيع فترة إعادة التوازن تجده في تبويب «خطة الشراء».
+          </div>
         </div>
 
         <div style={S.divBox}>
@@ -1269,6 +1291,8 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
       <div style={S.disc}>
         <b style={{ color:"#E5B143" }}>كيف تقرأ هذي الأرقام</b>
         <div style={{ marginTop:8 }}>
+          الحساب يفترض التزامك بالضخ الشهري دون انقطاع، وتوزيعه على نسب الخطة الدائمة.
+          <div style={{ marginTop:8 }} />
           هذي حسابات رياضية لافتراضات، وليست توقعًا لما سيحدث. الأسواق لا تنمو بنسبة ثابتة —
           ترتفع وتنخفض وقد تمر بسنوات سالبة متتالية. استخدمها لمقارنة السيناريوهات ولفهم أثر الاستمرار في الاستثمار المنتظم، لا كوعد برقم.
         </div>
@@ -1451,6 +1475,11 @@ function Planner({ byLine, cash, M, frozen }) {
                       <div style={{ ...S.dim, fontSize:10.5, fontFamily:MONO }}>
                         {(sh*100).toFixed(0)}٪ من الخط{h.price>0 && `  ·  ≈ ${(amt/h.price).toFixed(2)} وحدة`}
                       </div>
+                      {cur === "USD" && rate > 0 && amt > 0 && (
+                        <div style={{ fontSize:11, color:"#5EC8FF", fontFamily:MONO, marginTop:3 }}>
+                          د.ك {(amt / rate).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1512,11 +1541,26 @@ function Editor({ h, onSave, onCancel, onDelete }) {
 
 /* ═══════════════ عناصر ═══════════════ */
 function Field({ label, value, onChange, step, text }) {
+  // نحتفظ بنص محلي أثناء الكتابة حتى لا يلتصق الصفر ببداية الرقم
+  const [draft, setDraft] = useState(null);
+  const shown = draft !== null ? draft : String(value ?? "");
+
   return (
     <label style={{ display:"flex", flexDirection:"column", minWidth:160, flex:1 }}>
       <span style={S.label}>{label}</span>
-      <input type={text?"text":"number"} step={step} value={value}
-             onChange={e => onChange(e.target.value)} style={S.input} />
+      <input
+        type={text ? "text" : "number"}
+        step={step}
+        value={shown}
+        onFocus={e => { setDraft(""); requestAnimationFrame(() => e.target.select()); }}
+        onChange={e => {
+          const v = e.target.value;
+          setDraft(v);
+          onChange(v === "" ? (text ? "" : "0") : v);
+        }}
+        onBlur={() => setDraft(null)}
+        style={S.input}
+      />
     </label>
   );
 }
@@ -1640,6 +1684,7 @@ const S = {
   retGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginBottom:16 },
   retCard:{ background:"rgba(0,0,0,0.2)", border:"1px solid rgba(255,255,255,0.06)", borderInlineStartWidth:3, borderInlineStartStyle:"solid", borderRadius:10, padding:"13px 14px" },
   projRow:{ display:"flex", alignItems:"center", gap:14, padding:"15px 0", borderBottom:"1px solid rgba(255,255,255,0.045)", flexWrap:"wrap" },
+  phaseBox:{ marginTop:16, background:"rgba(0,0,0,0.22)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:11, padding:"14px 16px" },
   disc:{ background:"rgba(229,177,67,0.05)", border:"1px solid rgba(229,177,67,0.2)", borderRadius:12, padding:18, fontSize:12.8, color:"#A8BFB0", lineHeight:1.9, marginBottom:16 },
   sevBox:{ background:"rgba(0,0,0,0.2)", border:"1px solid", borderRadius:11, padding:"14px 24px", textAlign:"center", minWidth:125 },
   sevTag:{ fontSize:11, fontWeight:700, padding:"3px 11px", borderRadius:999, border:"1px solid" },
