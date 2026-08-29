@@ -1,4 +1,5 @@
 
+
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -475,16 +476,19 @@ function App({ pass, onLogout }) {
       const list = rows.filter(r => r.line === k).sort((a, b) => b.value - a.value);
       const v = list.reduce((s, r) => s + r.value, 0);
       const b = list.reduce((s, r) => s + r.basis, 0);
-      m[k] = { list, value: v, basis: b, weight: total > 0 ? v / total : 0, gap: LINES[k].target * total - v };
+      // الوزن يُقاس على المبلغ المستثمر فقط — السيولة تُعرض منفصلة ولا تدخل التوزيع
+      m[k] = { list, value: v, basis: b,
+               weight: invested > 0 ? v / invested : 0,
+               gap: LINES[k].target * invested - v };
     });
     return m;
-  }, [rows, total]);
+  }, [rows, invested]);
 
   const biggest = rows.reduce((a, b) => (b.value > (a?.value ?? 0) ? b : a), null);
   const conc = biggest && total > 0 ? biggest.value / total : 0;
     // نسبة التوازن تُقاس على المبلغ المستثمر فقط — الكاش غير الموزّع لا يدخل الحساب
   const drift = invested > 0
-    ? ORDER.reduce((s, k) => s + Math.abs((byLine[k].value / invested) - LINES[k].target), 0)
+    ? ORDER.reduce((s, k) => s + Math.abs(byLine[k].weight - LINES[k].target), 0)
     : 0;
   const progress = invested > 0 ? Math.max(0, Math.min(1, 1 - drift / 1.2)) : 0;
 
@@ -579,7 +583,8 @@ function App({ pass, onLogout }) {
               sub={basis>0 ? (totalPL>=0?"+":"−")+pct(Math.abs(totalPL/basis)) : "—"}
               tone={totalPL>=0?"#37C793":"#E4574C"} />
         <Stat label="إجمالي التكلفة" value={M(basis)} tone="#8CA396" />
-        <Stat label="السيولة الجاهزة" value={M(cash)} tone="#E5B143" />
+        <Stat label="السيولة الجاهزة" value={M(cash)} tone="#E5B143"
+              sub={total > 0 ? pct(cash / total) + " من المحفظة" : "—"} />
         <div style={S.statCard}>
           <div style={S.label}>اكتمال إعادة التوازن</div>
           <div style={{ ...S.statVal, color:"#EAF3EC" }}>{Math.round(progress*100)}%</div>
@@ -755,11 +760,6 @@ function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, onClear, cash
             <button onClick={onClear} style={S.resetBtn}>ابدأ من الصفر</button>
           </div>
         </div>
-        <div style={S.fields}>
-          <Field label="السيولة النقدية (دولار)" value={cash} onChange={v => setCash(num(parseFloat(v)))} />
-          <Field label="سعر صرف الدينار" value={rate} step="0.0001" onChange={v => setRate(num(parseFloat(v))||1)} />
-        </div>
-
         <div style={S.costBar}>
           <div style={S.costItem}>
             <div style={S.label}>إجمالي تكلفة المحفظة</div>
@@ -829,6 +829,14 @@ function Squad({ rows, byLine, M, frozen, onEdit, onFreeze, onAdd, onClear, cash
           </div>
         );
       })}
+
+      <div style={S.card}>
+        <Head title="إعدادات" note="السيولة النقدية وسعر صرف الدينار" />
+        <div style={S.fields}>
+          <Field label="السيولة النقدية (دولار)" value={cash} onChange={v => setCash(num(parseFloat(v)))} />
+          <Field label="سعر صرف الدينار" value={rate} step="0.0001" onChange={v => setRate(num(parseFloat(v))||1)} />
+        </div>
+      </div>
     </React.Fragment>
   );
 }
@@ -1272,24 +1280,45 @@ function Future({ rows, byLine, total, M, returns, setReturns, monthly, setMonth
         })}
       </div>
 
-      <div style={S.card}>
-        <Head title="التفصيل حسب الخط" />
-        <div style={{ overflowX:"auto" }}>
-          <table style={S.table}>
-            <thead><tr><th style={S.th}>الخط</th>{HORIZONS.map(y => <th key={y} style={S.th}>{y} سنة</th>)}</tr></thead>
-            <tbody>
-              {ORDER.map(k => (
-                <tr key={k}>
-                  <td style={S.td}><span style={{ ...S.dot, background:LINES[k].color, display:"inline-block", marginInlineEnd:7 }} />{LINES[k].short}</td>
-                  {proj.map(p => <td key={p.years} style={S.tdN}>{M(p.lines[k])}</td>)}
-                </tr>
+      <div style={{ ...S.card, marginBottom:14 }}>
+        <Head title="التفصيل حسب الخط" note="نمو كل خط على حدة عبر السنوات" flush />
+      </div>
+
+      {ORDER.map(k => {
+        const L = LINES[k];
+        return (
+          <div key={k} style={{ ...S.card, marginBottom:14, borderInlineStartColor:L.color, background:L.soft }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+              <span style={{ ...S.badge, background:L.color }}>{L.name}</span>
+              <span style={{ ...S.dim, fontFamily:MONO, fontSize:11.5 }}>اليوم {M(byLine[k].value)}</span>
+            </div>
+            <div style={S.yearGrid}>
+              {proj.map(p => (
+                <div key={p.years} style={S.yearCell}>
+                  <div style={{ ...S.dim, fontSize:11 }}>{p.years} سنة</div>
+                  <div style={{ fontFamily:MONO, fontSize:15, fontWeight:600, color:"#EAF3EC", marginTop:3 }}>
+                    {M(p.lines[k])}
+                  </div>
+                </div>
               ))}
-              <tr>
-                <td style={{ ...S.td, fontWeight:700, color:"#EAF3EC" }}>الإجمالي</td>
-                {proj.map(p => <td key={p.years} style={{ ...S.tdN, fontWeight:700, color:"#EAF3EC" }}>{M(p.total)}</td>)}
-              </tr>
-            </tbody>
-          </table>
+            </div>
+          </div>
+        );
+      })}
+
+      <div style={{ ...S.card, marginBottom:14 }}>
+        <div style={{ marginBottom:14 }}>
+          <span style={{ ...S.badge, background:"#EAF3EC", color:"#0A1712" }}>الإجمالي</span>
+        </div>
+        <div style={S.yearGrid}>
+          {proj.map(p => (
+            <div key={p.years} style={S.yearCell}>
+              <div style={{ ...S.dim, fontSize:11 }}>{p.years} سنة</div>
+              <div style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:"#37C793", marginTop:3 }}>
+                {M(p.total)}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -1717,6 +1746,8 @@ const S = {
   retGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginBottom:16 },
   retCard:{ background:"rgba(0,0,0,0.2)", border:"1px solid rgba(255,255,255,0.06)", borderInlineStartWidth:3, borderInlineStartStyle:"solid", borderRadius:10, padding:"13px 14px" },
   projRow:{ display:"flex", alignItems:"center", gap:14, padding:"15px 0", borderBottom:"1px solid rgba(255,255,255,0.045)", flexWrap:"wrap" },
+  yearGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))", gap:10 },
+  yearCell:{ background:"rgba(0,0,0,0.25)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:9, padding:"10px 12px", textAlign:"center" },
   phaseBox:{ marginTop:16, background:"rgba(0,0,0,0.22)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:11, padding:"14px 16px" },
   disc:{ background:"rgba(229,177,67,0.05)", border:"1px solid rgba(229,177,67,0.2)", borderRadius:12, padding:18, fontSize:12.8, color:"#A8BFB0", lineHeight:1.9, marginBottom:16 },
   sevBox:{ background:"rgba(0,0,0,0.2)", border:"1px solid", borderRadius:11, padding:"14px 24px", textAlign:"center", minWidth:125 },
