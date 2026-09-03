@@ -394,6 +394,7 @@ function App({ pass, onLogout }) {
   const [yields, setYields]     = useState(st?.yields || DEFAULT_YIELDS);
   const [reinvest, setReinvest] = useState(st?.reinvest ?? true);
   const [live, setLive]         = useState(st?.live || null);
+  const [zakat, setZakat]       = useState(st?.zakat || {});
 
   const [sheetUrl, setSheetUrl] = useState(load(SHEET_KEY, ""));
   const [tab, setTab]           = useState("pitch");
@@ -423,6 +424,7 @@ function App({ pass, onLogout }) {
           if (d.yields) setYields(d.yields);
           if (typeof d.reinvest === "boolean") setReinvest(d.reinvest);
           if (d.live) setLive(d.live);
+          if (d.zakat) setZakat(d.zakat);
           if (typeof d.sheetUrl === "string") setSheetUrl(d.sheetUrl);
         }
       } catch (e) {
@@ -437,7 +439,7 @@ function App({ pass, onLogout }) {
     if (!ready) return;
     if (first.current) { first.current = false; return; }
 
-    const bundle = { holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl };
+    const bundle = { holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl, zakat };
     save(DATA_KEY, bundle);
     save(SHEET_KEY, sheetUrl);
 
@@ -452,7 +454,7 @@ function App({ pass, onLogout }) {
       }
     }, 700);
     return () => clearTimeout(t);
-  }, [holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl, ready]);
+  }, [holdings, cash, frozen, cur, rate, returns, monthly, live, yields, reinvest, sheetUrl, zakat, ready]);
 
   const M = useMemo(() => {
     const sym = cur === "USD" ? "$" : "د.ك ";
@@ -545,7 +547,7 @@ function App({ pass, onLogout }) {
     </div>
   );
 
-  const TABS = [["pitch","التشكيلة"],["squad","المراكز"],["analysis","التحليل"],["livetab","تحليل حي"],["future","المستقبل"],["risk","الإنذار"],["plan","خطة الشراء"]];
+  const TABS = [["pitch","التشكيلة"],["squad","المراكز"],["analysis","التحليل"],["livetab","تحليل حي"],["future","المستقبل"],["risk","الإنذار"],["plan","خطة الشراء"],["zakat","الزكاة"]];
 
   return (
     <div style={S.shell}>
@@ -625,6 +627,7 @@ function App({ pass, onLogout }) {
                                      yields={yields} setYields={setYields} reinvest={reinvest} setReinvest={setReinvest} />}
         {tab==="risk"     && <RiskPanel rows={rows} byLine={byLine} total={total} M={M} frozen={frozen} live={live} />}
         {tab==="plan"     && <Planner byLine={byLine} cash={cash} M={M} frozen={frozen} cur={cur} rate={rate} />}
+        {tab==="zakat"    && <Zakat rows={rows} cash={cash} rate={rate} zakat={zakat} setZakat={setZakat} M={M} cur={cur} />}
       </main>
 
       {editing && <Editor h={editing} onSave={saveHolding} onCancel={() => setEditing(null)} onDelete={removeHolding} />}
@@ -1151,6 +1154,391 @@ function Live({ rows, live, setLive, returns, setReturns, yields, setYields }) {
         </div>
       )}
     </React.Fragment>
+  );
+}
+
+/* ═══════════════ الزكاة والتطهير ═══════════════ */
+const ZAKAT_RATE  = 0.025;
+const NISAB_GRAMS = 85;
+const AED_USD     = 1 / 3.6725;
+
+// يحوّل رمز/اسم المركز إلى رمز معياري يفهمه الخادم — يدعم أي محفظة
+const CANON = [
+  [/KFH\s*R[IE]{1,2}T|بيتك\s*ريت/i,  "KFH REIT",       "KW"],
+  [/^KFH\b|بيت التمويل/i,          "KFH",            "KW"],
+  [/\bIAU\b|صندوق الذهب/i,          "IAU",            "US"],
+  [/ZAIN|زين/i,                    "ZAIN",           "KW"],
+  [/MABANE|مباني/i,                "MABANEE",        "KW"],
+  [/SPUS/i,                        "SPUS",           "US"],
+  [/AGILITY|أجيليتي/i,             "AGILITY GLOBAL", "AE"],
+  [/MKHAZEN|مخازن/i,               "MKHAZEN",        "KW"],
+  [/HUM[AE]NSOFT|هيومن/i,          "HUMANSOFT",      "KW"],
+  [/MICROSOFT|MSFT/i,              "MSFT",           "US"],
+  [/NVIDIA|NVDA/i,                 "NVDA",           "US"],
+  [/GOOGL?E?\b/i,                  "GOOGL",          "US"],
+  [/\bMETA\b/i,                    "META",           "US"],
+  [/TSLA|TESLA|تسلا/i,             "TSLA",           "US"],
+  [/ALIBABA|BABA/i,                "BABA",           "US"],
+  [/IBIT|بيتكوين/i,                "IBIT",           "US"],
+  [/UBER|أوبر/i,                   "UBER",           "US"],
+];
+function canon(h) {
+  const s = (h.ticker || "") + " " + (h.name || "");
+  for (const [re, sym, mk] of CANON) if (re.test(s)) return { symbol: sym, market: mk };
+  return { symbol: (h.ticker || "").toUpperCase().trim(), market: "US" };
+}
+
+// السنة الهجرية الحالية (أم القرى)
+function hijriYear(d = new Date()) {
+  try {
+    const s = new Intl.DateTimeFormat("en-u-ca-islamic-umalqura", { year: "numeric" }).format(d);
+    const m = s.match(/\d{4}/); if (m) return +m[0];
+  } catch {}
+  return Math.floor((d.getFullYear() - 622) * 33 / 32);
+}
+
+// سعر صرف عملة التداول إلى الدولار
+const fxOf = (market, rate) => market === "KW" ? rate : market === "AE" ? AED_USD : 1;
+
+// حساب بند واحد — كل الأرقام بالدولار
+function calcZakatItem(it, rate) {
+  const value = num(it.qty * it.price);
+  const fx = fxOf(it.market, rate);
+  let zakat, basis;
+  if (it.method === "precise" && typeof it.zakatPerShare === "number") {
+    zakat = it.qty * it.zakatPerShare * fx; basis = "zps";
+  } else if (it.method === "precise" && typeof it.zakatableRatio === "number") {
+    zakat = value * it.zakatableRatio * ZAKAT_RATE; basis = "ratio";
+  } else {
+    zakat = value * ZAKAT_RATE; basis = "full";
+  }
+  const divs = it.qty * num(it.dps) * fx;
+  let purify;
+  if (typeof it.purificationPerShare === "number") purify = it.qty * it.purificationPerShare * fx;
+  else purify = divs * num(it.purificationRatio);
+  const hasPrecise = typeof it.zakatPerShare === "number" || typeof it.zakatableRatio === "number";
+  return { value, zakat, divs, purify, basis, hasPrecise };
+}
+
+const ASSET_LABEL = {
+  gold:"ذهب", crypto:"عملة رقمية", islamic_company:"شركة إسلامية", islamic_fund:"صندوق إسلامي",
+  mixed_company:"شركة مختلطة", us_stock:"سهم أمريكي", sharia_etf:"صندوق شرعي", reit:"صندوق عقاري", other:"أخرى",
+};
+const CONF = {
+  high:   ["موثوق",  "#37C793"],
+  medium: ["متوسط",  "#E5B143"],
+  low:    ["يحتاج تأكيد", "#E4574C"],
+};
+
+function Zakat({ rows, cash, rate, zakat, setZakat, M, cur }) {
+  const thisYear = hijriYear();
+  const years = Array.from(new Set([thisYear, ...Object.keys(zakat || {}).map(Number)])).sort((a, b) => b - a);
+  const [year, setYear] = useState(thisYear);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+  const [confirm, setConfirm] = useState(false);
+
+  const snap = zakat?.[year] || null;
+  const patch = (fn) => setZakat(z => ({ ...(z || {}), [year]: fn({ ...(z?.[year] || {}) }) }));
+  const patchItem = (id, f) => patch(s => ({ ...s, items: s.items.map(it => it.id === id ? { ...it, ...f } : it) }));
+
+  const run = async () => {
+    setConfirm(false); setBusy(true); setErr("");
+    try {
+      const active = rows.filter(r => r.qty > 0);
+      if (!active.length) throw new Error("ما فيه مراكز بكميات أكبر من صفر");
+
+      // نجمّع المراكز المتشابهة (مثل تسلا القديم والجديد) تحت رمز واحد للبحث
+      const bySym = {};
+      active.forEach(r => { const c = canon(r); (bySym[c.symbol] ||= { ...c, name: r.name }); });
+
+      const res = await fetch("/api/zakat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ holdings: Object.values(bySym) }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `رمز ${res.status}`);
+
+      const items = active.map(r => {
+        const c = canon(r);
+        const m = (d.items || []).find(x => x.symbol === c.symbol) || {};
+        const hasPrecise = typeof m.zakatPerShare === "number" || typeof m.zakatableRatio === "number";
+        return {
+          id: r.id, name: r.name, ticker: r.ticker, symbol: c.symbol, market: c.market,
+          qty: r.qty, price: r.price,
+          assetType: m.assetType || "other",
+          shariaStatus: m.shariaStatus || "disputed",
+          zakatPerShare: m.zakatPerShare ?? null,
+          zakatableRatio: m.zakatableRatio ?? null,
+          purificationRatio: m.purificationRatio ?? null,
+          purificationPerShare: m.purificationPerShare ?? null,
+          dps: m.dividendPerShare12m ?? 0,
+          currency: m.currency || "",
+          source: m.source || "",
+          confidence: m.confidence || "low",
+          notes: m.notes || "",
+          // الافتراضي احتياطي حتى لو وُجدت نسبة دقيقة — التبديل بيدك
+          method: "conservative",
+          approved: (m.confidence || "low") !== "low",
+          _hasPrecise: hasPrecise,
+        };
+      });
+
+      patch(s => ({
+        year, at: new Date().toISOString(), items, cash, rate,
+        goldUsdPerGram: d.goldUsdPerGram || null,
+        paid: false, paidAt: null,
+      }));
+    } catch (e) {
+      setErr(e.message + " — افتح /api/zakat في المتصفح لفحص حالة المفتاح.");
+    }
+    setBusy(false);
+  };
+
+  // ───── الإجماليات
+  const calc = snap ? snap.items.map(it => ({ it, c: calcZakatItem(it, snap.rate) })) : [];
+  const counted  = calc.filter(x => x.it.approved);
+  const pending  = calc.filter(x => !x.it.approved);
+  const zakatStocks = counted.reduce((s, x) => s + x.c.zakat, 0);
+  const zakatCash   = num(snap?.cash) * ZAKAT_RATE;
+  const purifyTotal = counted.reduce((s, x) => s + x.c.purify, 0);
+  const zakatTotal  = zakatStocks + zakatCash;
+  const grand       = zakatTotal + purifyTotal;
+  const wealth      = calc.reduce((s, x) => s + x.c.value, 0) + num(snap?.cash);
+  const nisab       = snap?.goldUsdPerGram ? snap.goldUsdPerGram * NISAB_GRAMS : null;
+
+  const both = (v) => {
+    const other = cur === "USD" ? "د.ك " + (v / rate).toLocaleString("en-US", { maximumFractionDigits: 0 })
+                                : "$" + v.toLocaleString("en-US", { maximumFractionDigits: 0 });
+    return other;
+  };
+
+  const setAllMethod = (m) => patch(s => ({ ...s, items: s.items.map(it => ({ ...it, method: m })) }));
+  const anyPrecise = calc.some(x => x.c.hasPrecise);
+  const allPrecise = anyPrecise && calc.filter(x => x.c.hasPrecise).every(x => x.it.method === "precise");
+
+  return (
+    <React.Fragment>
+      <div style={S.card}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+          <Head title="الزكاة والتطهير" note="يجلب نسب الزكاة والتطهير لكل سهم من مصادرها ويحسبها على مراكزك الحالية" flush />
+          <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+            <div style={S.segment}>
+              {years.map(y => (
+                <button key={y} onClick={() => setYear(y)} style={{ ...S.segBtn, ...(year===y?S.segOn:{}), fontFamily:MONO }}>{y}هـ</button>
+              ))}
+            </div>
+            <button onClick={() => snap ? setConfirm(true) : run()} disabled={busy}
+                    style={{ ...S.liveBtn, opacity:busy?0.55:1 }}>
+              {busy ? "جاري الجلب…" : snap ? "↻ إعادة الجلب" : "▶ ابدأ الحساب"}
+            </button>
+          </div>
+        </div>
+
+        {busy && (
+          <div style={S.progress}>
+            <div style={S.spinner} />
+            <div>
+              <div style={{ color:"#EAF3EC", fontSize:13 }}>أبحث عن نسب الزكاة والتطهير وآخر التوزيعات لكل سهم…</div>
+              <div style={{ ...S.dim, fontSize:11.5, marginTop:3 }}>يستغرق دقيقة إلى دقيقتين</div>
+            </div>
+          </div>
+        )}
+        {err && <div style={S.err}>{err}</div>}
+
+        {confirm && (
+          <div style={{ ...S.modeNote, borderColor:"rgba(229,177,67,0.3)", border:"1px solid rgba(229,177,67,0.3)" }}>
+            إعادة الجلب تستبدل النسب والتعديلات اليدوية لسنة {year}هـ بأرقام جديدة على الكميات الحالية. تكمل؟
+            <div style={{ display:"flex", gap:8, marginTop:10 }}>
+              <button onClick={run} style={S.primary}>نعم، أعد الجلب</button>
+              <button onClick={() => setConfirm(false)} style={S.ghost}>إلغاء</button>
+            </div>
+          </div>
+        )}
+
+        {snap && !busy && (
+          <div style={{ ...S.dim, fontSize:11.5, marginTop:14, display:"flex", gap:14, flexWrap:"wrap" }}>
+            <span>لقطة: {new Date(snap.at).toLocaleString("ar",{dateStyle:"medium",timeStyle:"short"})}</span>
+            {snap.paid && <span style={{ color:"#37C793" }}>✓ تم الإخراج {snap.paidAt ? new Date(snap.paidAt).toLocaleDateString("ar",{dateStyle:"medium"}) : ""}</span>}
+          </div>
+        )}
+      </div>
+
+      {!snap && !busy && (
+        <div style={{ ...S.card, textAlign:"center", padding:44 }}>
+          <div style={{ fontSize:30, marginBottom:12 }}>🕌</div>
+          <div style={{ fontFamily:DISPLAY, fontSize:16, fontWeight:700, color:"#EAF3EC", marginBottom:8 }}>ما فيه حساب لسنة {year}هـ بعد</div>
+          <div style={{ ...S.dim, fontSize:12.5, lineHeight:1.9, maxWidth:460, margin:"0 auto" }}>
+            اضغط «ابدأ الحساب» أول رمضان. يصنّف كل أصل حسب طبيعته، يجلب نسبة الزكاة ونسبة التطهير من الهيئات الشرعية والفاحصين،
+            ويحسب المبلغ على كمياتك الحالية. أي رقم بثقة منخفضة ما يدخل المجموع حتى تعتمده بنفسك.
+          </div>
+        </div>
+      )}
+
+      {snap && (
+        <React.Fragment>
+          <div style={{ ...S.sumGrid, marginBottom:16 }}>
+            <Sum label="زكاة الأسهم والأصول" value={M(zakatStocks)} />
+            <Sum label="زكاة السيولة" value={M(zakatCash)} tone="#E5B143" />
+            <Sum label="التطهير" value={M(purifyTotal)} tone="#5EC8FF" />
+            <Sum label="الإجمالي للإخراج" value={M(grand)} tone="#37C793" />
+          </div>
+
+          <div style={{ ...S.card, borderInlineStartColor: snap.paid ? "#37C793" : "#E5B143" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+              <div>
+                <div style={{ fontFamily:MONO, fontSize:26, fontWeight:600, color:"#EAF3EC" }}>{M(grand)}</div>
+                <div style={{ ...S.dim, fontSize:12, marginTop:3, fontFamily:MONO }}>≈ {both(grand)}</div>
+                <div style={{ ...S.dim, fontSize:12, marginTop:8, lineHeight:1.8 }}>
+                  زكاة {M(zakatTotal)} + تطهير {M(purifyTotal)}
+                  {pending.length > 0 && <span style={{ color:"#E4574C" }}> · {pending.length} بند بانتظار اعتمادك غير مشمول</span>}
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                {anyPrecise && (
+                  <div style={S.segment}>
+                    <button onClick={() => setAllMethod("conservative")} style={{ ...S.segBtn, ...(!allPrecise?S.segOn:{}) }}>احتياطية</button>
+                    <button onClick={() => setAllMethod("precise")} style={{ ...S.segBtn, ...(allPrecise?S.segOn:{}) }}>دقيقة</button>
+                  </div>
+                )}
+                <button onClick={() => patch(s => ({ ...s, paid: !s.paid, paidAt: s.paid ? null : new Date().toISOString() }))}
+                        style={snap.paid ? S.ghost : S.primary}>
+                  {snap.paid ? "إلغاء علامة الإخراج" : "✓ تم الإخراج"}
+                </button>
+              </div>
+            </div>
+
+            {nisab && (
+              <div style={{ ...S.dim, fontSize:11.5, marginTop:14 }}>
+                النصاب ({NISAB_GRAMS} غرام ذهب) ≈ {M(nisab)} · ثروتك الزكوية {M(wealth)} —{" "}
+                <span style={{ color: wealth >= nisab ? "#37C793" : "#E5B143" }}>{wealth >= nisab ? "بلغت النصاب" : "لم تبلغ النصاب"}</span>
+              </div>
+            )}
+            <div style={{ ...S.dim, fontSize:11.5, marginTop:6, lineHeight:1.8 }}>
+              الاحتياطية: ٢٫٥٪ من كامل القيمة السوقية. الدقيقة: زكاة السهم كما نشرتها الهيئة الشرعية أو ٢٫٥٪ × نسبة الموجودات الزكوية — تظهر فقط للأسهم اللي وُجد لها رقم.
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <Head title="تفاصيل البنود" note="كل الأرقام قابلة للتعديل — تغييرك يُحفظ مع اللقطة" />
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ ...S.table, width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr>
+                  <th style={S.th}>الأصل</th>
+                  <th style={S.th}>النوع</th>
+                  <th style={S.th}>القيمة</th>
+                  <th style={S.th}>الطريقة</th>
+                  <th style={S.th}>الزكاة</th>
+                  <th style={S.th}>توزيعات/سهم</th>
+                  <th style={S.th}>تطهير ٪</th>
+                  <th style={S.th}>التطهير</th>
+                  <th style={S.th}>الثقة</th>
+                </tr></thead>
+                <tbody>
+                  {calc.map(({ it, c }) => {
+                    const [cl, cc] = CONF[it.confidence] || CONF.low;
+                    const dim = !it.approved;
+                    return (
+                      <tr key={it.id} style={{ opacity: dim ? 0.55 : 1 }}>
+                        <td style={S.td}>
+                          <div style={{ color:"#EAF3EC", fontWeight:600 }}>{it.name}</div>
+                          <div style={S.tag}>{it.ticker} · {it.qty.toLocaleString("en-US")} سهم</div>
+                        </td>
+                        <td style={S.td}>
+                          <div>{ASSET_LABEL[it.assetType] || it.assetType}</div>
+                          {it.shariaStatus === "non_compliant" && <div style={{ fontSize:10.5, color:"#E4574C" }}>غير متوافق حسب المصدر</div>}
+                          {it.shariaStatus === "disputed" && <div style={{ fontSize:10.5, color:"#E5B143" }}>مختلف فيه</div>}
+                        </td>
+                        <td style={S.tdN}>{M(c.value)}</td>
+                        <td style={S.td}>
+                          {c.hasPrecise ? (
+                            <div style={S.segment}>
+                              <button onClick={() => patchItem(it.id, { method:"conservative" })} style={{ ...S.segBtn, padding:"4px 8px", fontSize:11, ...(it.method!=="precise"?S.segOn:{}) }}>احتياطية</button>
+                              <button onClick={() => patchItem(it.id, { method:"precise" })} style={{ ...S.segBtn, padding:"4px 8px", fontSize:11, ...(it.method==="precise"?S.segOn:{}) }}>دقيقة</button>
+                            </div>
+                          ) : <span style={S.dimSm}>٢٫٥٪ كاملة</span>}
+                          {it.market !== "US" && (
+                            <ZCell label={"زكاة/سهم " + it.currency} value={it.zakatPerShare} step="0.0001"
+                                   onChange={v => patchItem(it.id, { zakatPerShare: v })} />
+                          )}
+                          <ZCell label="نسبة زكوية ٪" value={it.zakatableRatio == null ? null : +(it.zakatableRatio*100).toFixed(2)} step="0.1"
+                                 onChange={v => patchItem(it.id, { zakatableRatio: v == null ? null : v/100 })} />
+                        </td>
+                        <td style={{ ...S.tdN, color:"#EAF3EC" }}>{M(c.zakat)}</td>
+                        <td style={S.td}>
+                          <ZCell label={it.currency} value={it.dps} step="0.001" onChange={v => patchItem(it.id, { dps: v || 0 })} />
+                        </td>
+                        <td style={S.td}>
+                          {typeof it.purificationPerShare === "number"
+                            ? <ZCell label={"تطهير/سهم " + it.currency} value={it.purificationPerShare} step="0.0001" onChange={v => patchItem(it.id, { purificationPerShare: v })} />
+                            : <ZCell label="٪" value={it.purificationRatio == null ? null : +(it.purificationRatio*100).toFixed(2)} step="0.1"
+                                     onChange={v => patchItem(it.id, { purificationRatio: v == null ? null : v/100 })} />}
+                        </td>
+                        <td style={{ ...S.tdN, color:"#5EC8FF" }}>{M(c.purify)}</td>
+                        <td style={S.td}>
+                          <span style={{ ...S.sevTag, background:cc+"1A", color:cc, borderColor:cc+"50", whiteSpace:"nowrap" }}>{cl}</span>
+                          <div style={{ marginTop:6 }}>
+                            <label style={{ fontSize:11, color:"#8CA396", display:"flex", alignItems:"center", gap:5, cursor:"pointer" }}>
+                              <input type="checkbox" checked={!!it.approved} onChange={e => patchItem(it.id, { approved: e.target.checked })} />
+                              معتمد
+                            </label>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr>
+                    <td style={S.td}><div style={{ color:"#EAF3EC", fontWeight:600 }}>السيولة</div><div style={S.tag}>نقد</div></td>
+                    <td style={S.td}>نقد</td>
+                    <td style={S.tdN}>{M(num(snap.cash))}</td>
+                    <td style={S.td}><span style={S.dimSm}>٢٫٥٪ كاملة</span></td>
+                    <td style={{ ...S.tdN, color:"#EAF3EC" }}>{M(zakatCash)}</td>
+                    <td style={S.td} colSpan={4}><span style={S.dimSm}>لا تطهير</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ marginTop:16 }}>
+              {calc.filter(x => x.it.source || x.it.notes).map(({ it }) => (
+                <div key={it.id} style={{ fontSize:11.5, color:"#6E8A7C", lineHeight:1.8, padding:"4px 0", borderBottom:"1px dashed rgba(255,255,255,0.05)" }}>
+                  <span style={{ color:"#A8BFB0", fontFamily:MONO }}>{it.symbol}</span> — {it.notes}
+                  {it.source && (/^https?:/.test(it.source)
+                    ? <a href={it.source} target="_blank" rel="noopener" style={{ color:"#5EC8FF", marginInlineStart:6, wordBreak:"break-all" }}>المصدر ↗</a>
+                    : <span style={{ marginInlineStart:6 }}>{it.source}</span>)}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={S.disc}>
+            <b style={{ color:"#E5B143" }}>قبل ما تخرج الزكاة</b>
+            <div style={{ marginTop:8 }}>
+              النسب مجمّعة من الويب وقد تكون لسنة سابقة أو من فاحص يختلف مع غيره. الطريقة الاحتياطية دائمًا آمنة ولو زادت عن الواجب.
+              التطهير محسوب على توزيعات آخر ١٢ شهر × كميتك الحالية، وهو تقريب إذا تغيّرت كميتك خلال السنة.
+              لا تُخرج زكاة مبنية على بند «يحتاج تأكيد» قبل ما تراجع مصدره. المرجع النهائي هو مرجعك الشرعي.
+            </div>
+          </div>
+        </React.Fragment>
+      )}
+    </React.Fragment>
+  );
+}
+
+// خانة رقمية صغيرة مع عنوان — فارغة تعني «غير معروف»
+function ZCell({ label, value, onChange, step }) {
+  const [draft, setDraft] = useState(null);
+  const shown = draft !== null ? draft : (value == null ? "" : String(value));
+  return (
+    <div style={{ marginTop:5 }}>
+      <div style={{ fontSize:10, color:"#5B7568" }}>{label}</div>
+      <input type="number" step={step} value={shown} placeholder="—"
+        onFocus={e => { setDraft(shown); requestAnimationFrame(() => e.target.select()); }}
+        onChange={e => { const v = e.target.value; setDraft(v); onChange(v === "" ? null : +v); }}
+        onBlur={() => setDraft(null)}
+        style={{ ...S.input, marginTop:2, padding:"5px 8px", fontSize:12.5, width:96, fontFamily:MONO }} />
+    </div>
   );
 }
 
