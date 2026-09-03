@@ -11,8 +11,8 @@ const MODEL = "claude-sonnet-5";
 
 // أصول حكمها ثابت بطبيعتها — لا تحتاج بحث
 const FIXED = {
-  "IAU":      { assetType:"gold",   shariaStatus:"compliant", purificationRatio:0, confidence:"high", source:"الذهب يُزكّى بكامل قيمته السوقية", notes:"" },
-  "IBIT":     { assetType:"crypto", shariaStatus:"disputed",  purificationRatio:0, confidence:"high", source:"يُعامل معاملة النقد وعروض التجارة", notes:"حكم البيتكوين مختلف فيه بين الهيئات" },
+  "IAU":      { zakatStatus:"amount", assetType:"gold",   shariaStatus:"compliant", purificationRatio:0, confidence:"high", source:"الذهب يُزكّى بكامل قيمته السوقية", notes:"" },
+  "IBIT":     { zakatStatus:"amount", assetType:"crypto", shariaStatus:"disputed",  purificationRatio:0, confidence:"high", source:"يُعامل معاملة النقد وعروض التجارة", notes:"حكم البيتكوين مختلف فيه بين الهيئات" },
   "KFH":      { assetType:"islamic_company", shariaStatus:"compliant", purificationRatio:0, confidence:"high", source:"بنك إسلامي بالكامل — لا تطهير", notes:"" },
   "KFH REIT": { assetType:"islamic_fund",    shariaStatus:"compliant", purificationRatio:0, confidence:"high", source:"صندوق عقاري إسلامي — لا تطهير", notes:"" },
 };
@@ -22,32 +22,86 @@ const SEARCH_ANYWAY = ["KFH", "KFH REIT"];
 
 const SYSTEM = `You are a Sharia-finance data researcher. The user is a Kuwaiti investor calculating zakat and
 purification (تطهير) for his portfolio for the current Hijri year. For EACH holding, search the web and return
-the most recent published figures. Search Arabic sources for Kuwaiti/Gulf companies (Boursa Kuwait disclosures,
-the company's Sharia board annual report, "زكاة السهم", "نسبة الزكاة للسهم", "نسبة التطهير").
+the most recent published figures.
+
+PRIMARY SOURCES — search these FIRST, by market:
+- Kuwait (Boursa Kuwait): بيت الزكاة الكويتي share-zakat table at zakathouse.org.kw/calculat.aspx (also calculate.aspx).
+  It lists "زكاة السهم" in KWD per share for every listed company, and marks companies as either an amount,
+  "ليس عليها زكاة" (nothing due), or "دفع الزكاة عن المساهمين" (company already paid on behalf of shareholders).
+  Secondary: sadaqaco.com yearly list "زكاة أسهم الشركات المدرجة في بورصة الكويت", then the company's own Sharia board report.
+- US stocks: Zoya (zoya.finance), then Musaffa, Islamicly, IdealRatings — for compliance status and purification ratio.
+- SPUS: SP Funds' own annual purification report (purification amount per share).
+- Abu Dhabi (ADX): the company's Sharia board / annual report, or an official screening provider.
 
 Fields per holding (null when not found — NEVER invent a number):
 - assetType: "islamic_company" | "mixed_company" | "us_stock" | "sharia_etf" | "reit" | "other"
 - shariaStatus: "compliant" | "non_compliant" | "disputed"
-- zakatPerShare: zakat amount PER SHARE in the trading currency, if the company's Sharia board publishes it
-  (common for Kuwaiti/Saudi companies, e.g. "زكاة السهم ٣ فلوس" -> 0.003 KWD). null otherwise.
+- zakatStatus: "amount" (zakatPerShare given) | "company_pays" (company paid on behalf of shareholders)
+               | "none_due" (authority says nothing is due) | "unknown"
+- zakatPerShare: zakat amount PER SHARE in trading currency (e.g. "3.5 فلس" -> 0.0035 KWD). null unless zakatStatus is "amount".
 - zakatableRatio: fraction 0-1 of share market value that is zakatable (نسبة الموجودات الزكوية), if published. null otherwise.
-- purificationRatio: fraction 0-1 of income that is non-permissible (from the Sharia board, or Zoya / Musaffa /
-  Islamicly / IdealRatings). Fully Islamic institutions -> 0.
-- purificationPerShare: purification amount PER SHARE in trading currency if a fund publishes it directly
-  (SP Funds publishes this annually for SPUS). null otherwise.
+- purificationRatio: fraction 0-1 of income that is non-permissible. Fully Islamic institutions -> 0.
+- purificationPerShare: purification amount PER SHARE in trading currency if a fund publishes it directly (SPUS). null otherwise.
 - dividendPerShare12m: total cash dividends per share paid in the last 12 months, trading currency. 0 if none.
 - currency: "KWD" | "AED" | "USD"
 - source: one URL or a clear reference (report name + year)
-- confidence: "high" | "medium" | "low". Rules: US-stock screening ratios are at most "medium" (screeners disagree);
-  anything not from an official company/fund/Sharia-board source is "low".
-- notes: one short Arabic line, e.g. what year the figure is from.
+- confidence: "high" | "medium" | "low". Zakat House / company Sharia board / fund report -> "high".
+  US-stock screening ratios are at most "medium" (screeners disagree). Anything else -> "low".
+- notes: one short Arabic line (which year the figure is from, e.g. "بيت الزكاة ١٤٤٧هـ").
 
 Also return goldUsdPerGram: current gold spot price in USD per gram (search for it).
 
-Return ONLY JSON, no prose, no markdown fences:
-{"goldUsdPerGram": number, "items":[{"symbol":"","assetType":"","shariaStatus":"","zakatPerShare":null,
-"zakatableRatio":null,"purificationRatio":null,"purificationPerShare":null,"dividendPerShare12m":null,
-"currency":"","source":"","confidence":"","notes":""}]}`;
+STRICT OUTPUT RULES: return ONLY one JSON object, no prose, no markdown fences. Never put double-quote characters
+inside string values (use single quotes or nothing). No trailing commas. No comments.
+{"goldUsdPerGram": number, "items":[{"symbol":"","assetType":"","shariaStatus":"","zakatStatus":"",
+"zakatPerShare":null,"zakatableRatio":null,"purificationRatio":null,"purificationPerShare":null,
+"dividendPerShare12m":null,"currency":"","source":"","confidence":"","notes":""}]}`;
+
+// يحاول قراءة JSON من نص فيه شوائب (أسوار، فواصل زائدة، نص قبل أو بعد)
+function parseLoose(text) {
+  var clean = String(text || "").replace(/```json|```/g, "").trim();
+  var s = clean.indexOf("{"), e = clean.lastIndexOf("}");
+  if (s === -1 || e === -1) return null;
+  var body = clean.slice(s, e + 1);
+  try { return JSON.parse(body); } catch (err) {}
+  try { return JSON.parse(body.replace(/,\s*([}\]])/g, "$1")); } catch (err) {}
+  return null;
+}
+
+// يطلب من النموذج إعادة صياغة رده كـ JSON صالح عبر أداة مُلزِمة بالمخطط — بدون بحث
+async function repairJson(key, brokenText) {
+  var schema = {
+    type: "object",
+    properties: {
+      goldUsdPerGram: { type: ["number", "null"] },
+      items: { type: "array", items: { type: "object", properties: {
+        symbol: { type: "string" }, assetType: { type: "string" }, shariaStatus: { type: "string" },
+        zakatStatus: { type: "string" },
+        zakatPerShare: { type: ["number", "null"] }, zakatableRatio: { type: ["number", "null"] },
+        purificationRatio: { type: ["number", "null"] }, purificationPerShare: { type: ["number", "null"] },
+        dividendPerShare12m: { type: ["number", "null"] }, currency: { type: "string" },
+        source: { type: "string" }, confidence: { type: "string" }, notes: { type: "string" }
+      }, required: ["symbol"] } }
+    },
+    required: ["items"]
+  };
+  try {
+    var r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 8000,
+        tools: [{ name: "report", description: "Deliver the zakat data", input_schema: schema }],
+        tool_choice: { type: "tool", name: "report" },
+        messages: [{ role: "user", content: "Convert the following into the report tool exactly, keeping every value; use null for unknown:\n\n" + brokenText.slice(0, 30000) }]
+      })
+    });
+    var d = await r.json();
+    var tu = (d.content || []).find(function (b) { return b.type === "tool_use"; });
+    return tu ? tu.input : null;
+  } catch (e) { return null; }
+}
 
 module.exports = async function handler(req, res) {
   // فحص سريع: افتح /api/zakat في المتصفح
@@ -115,7 +169,7 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           model: MODEL,
-          max_tokens: 6000,
+          max_tokens: 8000,
           system: SYSTEM,
           tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 20 }],
           messages: [{ role: "user", content: "Holdings:\n" + list + "\n\nReturn the JSON now." }]
@@ -136,11 +190,12 @@ module.exports = async function handler(req, res) {
 
       var text = "";
       (data.content || []).forEach(function (b) { if (b.type === "text") text += b.text + "\n"; });
-      var clean = text.replace(/```json|```/g, "").trim();
-      var s = clean.indexOf("{"), e = clean.lastIndexOf("}");
-      if (s === -1 || e === -1) { res.status(502).json({ error: "الرد جاء بدون بيانات مفهومة" }); return; }
-
-      var out = JSON.parse(clean.slice(s, e + 1));
+      var out = parseLoose(text);
+      if (!out) {
+        // الرد مكسور — نطلب من النموذج تحويله إلى JSON صالح بدون بحث
+        out = await repairJson(key, text);
+      }
+      if (!out) { res.status(502).json({ error: "الرد جاء بدون بيانات مفهومة" }); return; }
       gold = typeof out.goldUsdPerGram === "number" ? out.goldUsdPerGram : null;
       var items = Array.isArray(out.items) ? out.items : [];
 
@@ -153,7 +208,8 @@ module.exports = async function handler(req, res) {
           symbol: h.symbol,
           assetType: f.assetType || m.assetType || "mixed_company",
           shariaStatus: f.shariaStatus || m.shariaStatus || "disputed",
-          zakatPerShare: typeof m.zakatPerShare === "number" ? m.zakatPerShare : null,
+          zakatStatus: f.zakatStatus || m.zakatStatus || (typeof m.zakatPerShare === "number" ? "amount" : "unknown"),
+          zakatPerShare: typeof m.zakatPerShare === "number" ? m.zakatPerShare : (m.zakatStatus === "none_due" ? 0 : null),
           zakatableRatio: typeof m.zakatableRatio === "number" ? m.zakatableRatio : null,
           purificationRatio: f.purificationRatio != null ? f.purificationRatio
                              : (typeof m.purificationRatio === "number" ? m.purificationRatio : null),
