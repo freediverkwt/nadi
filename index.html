@@ -1205,7 +1205,11 @@ function calcZakatItem(it, rate) {
   const value = num(it.qty * it.price);
   const fx = fxOf(it.market, rate);
   let zakat, basis;
-  if (it.method === "precise" && typeof it.zakatPerShare === "number") {
+  if (it.method === "precise" && it.zakatStatus === "company_pays") {
+    zakat = 0; basis = "company";
+  } else if (it.method === "precise" && it.zakatStatus === "none_due") {
+    zakat = 0; basis = "none";
+  } else if (it.method === "precise" && typeof it.zakatPerShare === "number") {
     zakat = it.qty * it.zakatPerShare * fx; basis = "zps";
   } else if (it.method === "precise" && typeof it.zakatableRatio === "number") {
     zakat = value * it.zakatableRatio * ZAKAT_RATE; basis = "ratio";
@@ -1216,7 +1220,8 @@ function calcZakatItem(it, rate) {
   let purify;
   if (typeof it.purificationPerShare === "number") purify = it.qty * it.purificationPerShare * fx;
   else purify = divs * num(it.purificationRatio);
-  const hasPrecise = typeof it.zakatPerShare === "number" || typeof it.zakatableRatio === "number";
+  const hasPrecise = typeof it.zakatPerShare === "number" || typeof it.zakatableRatio === "number"
+                  || it.zakatStatus === "company_pays" || it.zakatStatus === "none_due";
   return { value, zakat, divs, purify, basis, hasPrecise };
 }
 
@@ -1263,12 +1268,14 @@ function Zakat({ rows, cash, rate, zakat, setZakat, M, cur }) {
       const items = active.map(r => {
         const c = canon(r);
         const m = (d.items || []).find(x => x.symbol === c.symbol) || {};
-        const hasPrecise = typeof m.zakatPerShare === "number" || typeof m.zakatableRatio === "number";
+        const hasPrecise = typeof m.zakatPerShare === "number" || typeof m.zakatableRatio === "number"
+                        || m.zakatStatus === "company_pays" || m.zakatStatus === "none_due";
         return {
           id: r.id, name: r.name, ticker: r.ticker, symbol: c.symbol, market: c.market,
           qty: r.qty, price: r.price,
           assetType: m.assetType || "other",
           shariaStatus: m.shariaStatus || "disputed",
+          zakatStatus: m.zakatStatus || "unknown",
           zakatPerShare: m.zakatPerShare ?? null,
           zakatableRatio: m.zakatableRatio ?? null,
           purificationRatio: m.purificationRatio ?? null,
@@ -1416,7 +1423,7 @@ function Zakat({ rows, cash, rate, zakat, setZakat, M, cur }) {
               </div>
             )}
             <div style={{ ...S.dim, fontSize:11.5, marginTop:6, lineHeight:1.8 }}>
-              الاحتياطية: ٢٫٥٪ من كامل القيمة السوقية. الدقيقة: زكاة السهم كما نشرتها الهيئة الشرعية أو ٢٫٥٪ × نسبة الموجودات الزكوية — تظهر فقط للأسهم اللي وُجد لها رقم.
+              الاحتياطية: ٢٫٥٪ من كامل القيمة السوقية. الدقيقة: مبلغ زكاة السهم كما ينشره بيت الزكاة الكويتي أو الهيئة الشرعية (وصفر إذا الشركة أخرجتها عن مساهميها) — تظهر فقط للأسهم اللي وُجد لها بيان.
             </div>
           </div>
 
@@ -1459,13 +1466,31 @@ function Zakat({ rows, cash, rate, zakat, setZakat, M, cur }) {
                             </div>
                           ) : <span style={S.dimSm}>٢٫٥٪ كاملة</span>}
                           {it.market !== "US" && (
-                            <ZCell label={"زكاة/سهم " + it.currency} value={it.zakatPerShare} step="0.0001"
-                                   onChange={v => patchItem(it.id, { zakatPerShare: v })} />
+                            <React.Fragment>
+                              <select value={it.zakatStatus || "unknown"}
+                                      onChange={e => patchItem(it.id, { zakatStatus: e.target.value, method: e.target.value === "unknown" ? it.method : "precise" })}
+                                      style={{ ...S.input, marginTop:6, padding:"5px 8px", fontSize:11.5, width:150 }}>
+                                <option value="unknown">حالة بيت الزكاة: غير معروفة</option>
+                                <option value="amount">مبلغ لكل سهم</option>
+                                <option value="company_pays">الشركة دفعتها عن المساهمين</option>
+                                <option value="none_due">ليس عليها زكاة</option>
+                              </select>
+                              {it.zakatStatus === "amount" && (
+                                <ZCell label={"زكاة/سهم " + it.currency} value={it.zakatPerShare} step="0.0001"
+                                       onChange={v => patchItem(it.id, { zakatPerShare: v })} />
+                              )}
+                            </React.Fragment>
                           )}
                           <ZCell label="نسبة زكوية ٪" value={it.zakatableRatio == null ? null : +(it.zakatableRatio*100).toFixed(2)} step="0.1"
                                  onChange={v => patchItem(it.id, { zakatableRatio: v == null ? null : v/100 })} />
                         </td>
-                        <td style={{ ...S.tdN, color:"#EAF3EC" }}>{M(c.zakat)}</td>
+                        <td style={{ ...S.tdN, color:"#EAF3EC" }}>
+                          {M(c.zakat)}
+                          {c.basis === "company" && <div style={{ fontSize:10, color:"#37C793", fontFamily:AR }}>الشركة أخرجتها عن المساهمين</div>}
+                          {c.basis === "none"    && <div style={{ fontSize:10, color:"#37C793", fontFamily:AR }}>ليس عليها زكاة حسب بيت الزكاة</div>}
+                          {c.basis === "zps"     && <div style={{ fontSize:10, color:"#6E8A7C", fontFamily:AR }}>زكاة السهم × الكمية</div>}
+                          {c.basis === "ratio"   && <div style={{ fontSize:10, color:"#6E8A7C", fontFamily:AR }}>نسبة الموجودات الزكوية</div>}
+                        </td>
                         <td style={S.td}>
                           <ZCell label={it.currency} value={it.dps} step="0.001" onChange={v => patchItem(it.id, { dps: v || 0 })} />
                         </td>
